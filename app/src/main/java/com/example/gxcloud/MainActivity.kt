@@ -59,6 +59,8 @@ class MainActivity : AppCompatActivity() {
             safeBrowsingEnabled = false
             setGeolocationEnabled(false)
             allowContentAccess = false
+            @Suppress("DEPRECATION")
+            saveFormData = false
         }
 
         // Allow cookies
@@ -101,6 +103,10 @@ class MainActivity : AppCompatActivity() {
             (function() {
                 if (window.__gxcloudInjected) return;
                 window.__gxcloudInjected = true;
+
+                const style = document.createElement('style');
+                style.textContent = '* { -webkit-tap-highlight-color: transparent !important; outline: none !important; }';
+                document.head.appendChild(style);
 
                 const hideMenuButton = () => {
                     const toggle = document.querySelector('button[aria-label="Quick Actions Toggle"]');
