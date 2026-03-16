@@ -6,8 +6,6 @@ import android.view.View
 import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.addCallback
@@ -26,8 +24,8 @@ class MainActivity : AppCompatActivity() {
 
         // Limit to 60Hz to save battery
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-            val mode = windowManager.defaultDisplay.supportedModes
-                .minByOrNull { Math.abs(it.refreshRate - 60f) }
+            val mode = display?.supportedModes
+                ?.minByOrNull { Math.abs(it.refreshRate - 60f) }
             mode?.let {
                 window.attributes.preferredDisplayModeId = it.modeId
             }
@@ -50,17 +48,12 @@ class MainActivity : AppCompatActivity() {
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
-            databaseEnabled = true
-            mediaPlaybackRequiresUserGesture = false
-            useWideViewPort = true
-            loadWithOverviewMode = true
-            cacheMode = WebSettings.LOAD_DEFAULT
+            mediaPlaybackRequiresUserGesture = true
             userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
             safeBrowsingEnabled = false
+            offscreenPreRaster = false
             setGeolocationEnabled(false)
             allowContentAccess = false
-            @Suppress("DEPRECATION")
-            saveFormData = false
         }
 
         // Allow cookies
@@ -72,14 +65,6 @@ class MainActivity : AppCompatActivity() {
         webView.webChromeClient = WebChromeClient()
 
         webView.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(
-                view: WebView,
-                request: WebResourceRequest
-            ): Boolean {
-                view.loadUrl(request.url.toString())
-                return true
-            }
-
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
                 injectScript(view)
@@ -108,7 +93,9 @@ class MainActivity : AppCompatActivity() {
                 style.textContent = '* { -webkit-tap-highlight-color: transparent !important; outline: none !important; }';
                 document.head.appendChild(style);
 
+                let menuHidden = false;
                 const hideMenuButton = () => {
+                    if (menuHidden) return;
                     const toggle = document.querySelector('button[aria-label="Quick Actions Toggle"]');
                     if (toggle) {
                         const container = toggle.closest('.absolute');
@@ -118,6 +105,7 @@ class MainActivity : AppCompatActivity() {
                             container.style.transition = 'opacity 0.2s';
                             container.addEventListener('touchstart', () => container.style.opacity = '0.5');
                             container.addEventListener('touchend', () => setTimeout(() => container.style.opacity = '0', 1000));
+                            menuHidden = true;
                         }
                     }
                 };
@@ -140,16 +128,63 @@ class MainActivity : AppCompatActivity() {
                     }
                 };
 
+                let observerTimeout = null;
+                let pollInterval = null;
+
+                const startPolling = () => {
+                    pollInterval = setInterval(() => {
+                        hideMenuButton();
+                        const video = document.querySelector('video');
+                        if (video && menuHidden) {
+                            clearInterval(pollInterval);
+                            pollInterval = null;
+                            applySharpening(video);
+                            watchForVideoRemoval(video);
+                        }
+                    }, 2000);
+                };
+
+                const startWatching = () => {
+                    menuHidden = false;
+                    observer.observe(document.body, { childList: true, subtree: true });
+                    observerTimeout = setTimeout(() => {
+                        observer.disconnect();
+                        startPolling();
+                    }, 20000);
+                };
+
+                const watchForVideoRemoval = (video) => {
+                    const parent = video.parentNode;
+                    if (!parent) return;
+                    const removalObserver = new MutationObserver(() => {
+                        if (!document.contains(video)) {
+                            removalObserver.disconnect();
+                            startWatching();
+                        }
+                    });
+                    removalObserver.observe(parent, { childList: true });
+                };
+
                 const observer = new MutationObserver(() => {
                     hideMenuButton();
                     const video = document.querySelector('video');
-                    if (video) applySharpening(video);
+                    if (video && menuHidden) {
+                        clearTimeout(observerTimeout);
+                        applySharpening(video);
+                        observer.disconnect();
+                        watchForVideoRemoval(video);
+                    }
                 });
 
-                observer.observe(document.body, { childList: true, subtree: true });
+                startWatching();
                 hideMenuButton();
                 const video = document.querySelector('video');
-                if (video) applySharpening(video);
+                if (video) {
+                    clearTimeout(observerTimeout);
+                    applySharpening(video);
+                    observer.disconnect();
+                    watchForVideoRemoval(video);
+                }
             })();
         """.trimIndent()
 
