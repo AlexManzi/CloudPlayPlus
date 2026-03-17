@@ -54,6 +54,10 @@ class MainActivity : AppCompatActivity() {
             offscreenPreRaster = false
             setGeolocationEnabled(false)
             allowContentAccess = false
+            setSupportZoom(false)
+            builtInZoomControls = false
+            databaseEnabled = false
+            layoutAlgorithm = android.webkit.WebSettings.LayoutAlgorithm.NORMAL
         }
 
         // Allow cookies
@@ -90,7 +94,7 @@ class MainActivity : AppCompatActivity() {
                 window.__gxcloudInjected = true;
 
                 const style = document.createElement('style');
-                style.textContent = '* { -webkit-tap-highlight-color: transparent !important; outline: none !important; }';
+                style.textContent = '* { -webkit-tap-highlight-color: transparent !important; outline: none !important; } button[aria-label="Exit preview"] { visibility: hidden !important; }';
                 document.head.appendChild(style);
 
                 let menuHidden = false;
@@ -124,6 +128,8 @@ class MainActivity : AppCompatActivity() {
                     if (!video.dataset.sharpened) {
                         video.dataset.sharpened = 'true';
                         injectSvgFilter();
+                        video.style.willChange = 'transform';
+                        video.style.transform = 'translateZ(0)';
                         video.style.filter = 'url(#gxcloud-sharpen)';
                     }
                 };
