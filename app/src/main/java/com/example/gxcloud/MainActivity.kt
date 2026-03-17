@@ -57,7 +57,6 @@ class MainActivity : AppCompatActivity() {
             setSupportZoom(false)
             builtInZoomControls = false
             databaseEnabled = false
-            layoutAlgorithm = android.webkit.WebSettings.LayoutAlgorithm.NORMAL
         }
 
         // Allow cookies
@@ -114,24 +113,98 @@ class MainActivity : AppCompatActivity() {
                     }
                 };
 
-                const injectSvgFilter = () => {
-                    if (!document.getElementById('gxcloud-svg-filter')) {
-                        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-                        svg.id = 'gxcloud-svg-filter';
-                        svg.setAttribute('style', 'position:absolute;width:0;height:0;overflow:hidden');
-                        svg.innerHTML = '<defs><filter id="gxcloud-sharpen" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB"><feConvolveMatrix order="3" kernelMatrix="0 -1 0 -1 7.3 -1 0 -1 0" edgeMode="duplicate" preserveAlpha="true"/><feColorMatrix type="saturate" values="1.2"/></filter></defs>';
-                        document.body.appendChild(svg);
-                    }
-                };
+                const setupWebGLCAS = (video) => {
+                    if (video.dataset.casSetup) return;
+                    video.dataset.casSetup = 'true';
 
-                const applySharpening = (video) => {
-                    if (!video.dataset.sharpened) {
-                        video.dataset.sharpened = 'true';
-                        injectSvgFilter();
-                        video.style.willChange = 'transform';
-                        video.style.transform = 'translateZ(0)';
-                        video.style.filter = 'url(#gxcloud-sharpen)';
+                    const canvas = document.createElement('canvas');
+                    document.body.appendChild(canvas);
+                    video.style.visibility = 'hidden';
+
+                    const gl = canvas.getContext('webgl2');
+                    if (!gl) {
+                        canvas.remove();
+                        video.style.visibility = '';
+                        return;
                     }
+
+                    const vert = '#version 300 es\nin vec4 position;\nvoid main(){gl_Position=position;}';
+                    const frag = '#version 300 es\nprecision highp float;\nuniform sampler2D data;\nuniform vec2 iResolution;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=gl_FragCoord.xy/iResolution.xy;\n  vec2 ts=1.0/iResolution.xy;\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+ts*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+ts*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+ts*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+ts*vec2(0,-1)).rgb;\n  vec3 mn=min(min(min(d,e),min(f,b)),h);\n  vec3 mx=max(max(max(d,e),max(f,b)),h);\n  vec3 amp=clamp(min(mn,2.0-mx)/mx,0.0,1.0);\n  amp=inversesqrt(amp);\n  vec3 w=-(1.0/(amp*5.6));\n  vec3 rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 s=mix(e,o,sharpenFactor);\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  fragColor=vec4(mix(l,s,1.2),1.0);\n}';
+
+                    const mkShader = (type, src) => {
+                        const s = gl.createShader(type);
+                        gl.shaderSource(s, src);
+                        gl.compileShader(s);
+                        return s;
+                    };
+
+                    const prog = gl.createProgram();
+                    gl.attachShader(prog, mkShader(gl.VERTEX_SHADER, vert));
+                    gl.attachShader(prog, mkShader(gl.FRAGMENT_SHADER, frag));
+                    gl.linkProgram(prog);
+                    gl.useProgram(prog);
+
+                    const vao = gl.createVertexArray();
+                    gl.bindVertexArray(vao);
+
+                    const buf = gl.createBuffer();
+                    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+                    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,3,-1,-1,3]), gl.STATIC_DRAW);
+                    const posLoc = gl.getAttribLocation(prog, 'position');
+                    gl.enableVertexAttribArray(posLoc);
+                    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+                    const tex = gl.createTexture();
+                    gl.bindTexture(gl.TEXTURE_2D, tex);
+                    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+                    gl.uniform1i(gl.getUniformLocation(prog, 'data'), 0);
+                    gl.uniform1f(gl.getUniformLocation(prog, 'sharpenFactor'), 0.5);
+                    const resLoc = gl.getUniformLocation(prog, 'iResolution');
+
+                    const syncSize = () => {
+                        const r = video.getBoundingClientRect();
+                        canvas.width = video.videoWidth || Math.round(r.width);
+                        canvas.height = video.videoHeight || Math.round(r.height);
+                        canvas.style.cssText = 'position:fixed;top:' + r.top + 'px;left:' + r.left + 'px;width:' + r.width + 'px;height:' + r.height + 'px;pointer-events:none;z-index:9999;';
+                        gl.viewport(0, 0, canvas.width, canvas.height);
+                        gl.uniform2f(resLoc, canvas.width, canvas.height);
+                        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, canvas.width, canvas.height, 0, gl.RGB, gl.UNSIGNED_BYTE, null);
+                    };
+                    syncSize();
+
+                    const ro = new ResizeObserver(syncSize);
+                    ro.observe(video);
+
+                    const useRVFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
+                    let frameHandle = null;
+
+                    const render = () => {
+                        if (video.readyState >= 2) {
+                            gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGB, gl.UNSIGNED_BYTE, video);
+                            gl.drawArrays(gl.TRIANGLES, 0, 3);
+                        }
+                        frameHandle = useRVFC
+                            ? video.requestVideoFrameCallback(render)
+                            : requestAnimationFrame(render);
+                    };
+                    frameHandle = useRVFC
+                        ? video.requestVideoFrameCallback(render)
+                        : requestAnimationFrame(render);
+
+                    video._casCleanup = () => {
+                        if (useRVFC) video.cancelVideoFrameCallback(frameHandle);
+                        else cancelAnimationFrame(frameHandle);
+                        ro.disconnect();
+                        canvas.remove();
+                        video.style.visibility = '';
+                        delete video.dataset.casSetup;
+                        delete video._casCleanup;
+                    };
                 };
 
                 let observerTimeout = null;
@@ -144,7 +217,7 @@ class MainActivity : AppCompatActivity() {
                         if (video && menuHidden) {
                             clearInterval(pollInterval);
                             pollInterval = null;
-                            applySharpening(video);
+                            setupWebGLCAS(video);
                             watchForVideoRemoval(video);
                         }
                     }, 2000);
@@ -165,6 +238,7 @@ class MainActivity : AppCompatActivity() {
                     const removalObserver = new MutationObserver(() => {
                         if (!document.contains(video)) {
                             removalObserver.disconnect();
+                            if (video._casCleanup) video._casCleanup();
                             startWatching();
                         }
                     });
@@ -176,7 +250,7 @@ class MainActivity : AppCompatActivity() {
                     const video = document.querySelector('video');
                     if (video && menuHidden) {
                         clearTimeout(observerTimeout);
-                        applySharpening(video);
+                        setupWebGLCAS(video);
                         observer.disconnect();
                         watchForVideoRemoval(video);
                     }
@@ -187,7 +261,7 @@ class MainActivity : AppCompatActivity() {
                 const video = document.querySelector('video');
                 if (video) {
                     clearTimeout(observerTimeout);
-                    applySharpening(video);
+                    setupWebGLCAS(video);
                     observer.disconnect();
                     watchForVideoRemoval(video);
                 }
