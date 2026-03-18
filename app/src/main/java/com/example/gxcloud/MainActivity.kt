@@ -96,9 +96,7 @@ class MainActivity : AppCompatActivity() {
                 style.textContent = '* { -webkit-tap-highlight-color: transparent !important; outline: none !important; } button[aria-label="Exit preview"] { visibility: hidden !important; }';
                 document.head.appendChild(style);
 
-                let menuHidden = false;
                 const hideMenuButton = () => {
-                    if (menuHidden) return;
                     const toggle = document.querySelector('button[aria-label="Quick Actions Toggle"]');
                     if (toggle) {
                         const container = toggle.closest('.absolute');
@@ -106,9 +104,10 @@ class MainActivity : AppCompatActivity() {
                             container.dataset.hidden = 'true';
                             container.style.opacity = '0';
                             container.style.transition = 'opacity 0.2s';
+                            container.addEventListener('mouseenter', () => container.style.opacity = '0.5');
+                            container.addEventListener('mouseleave', () => container.style.opacity = '0');
                             container.addEventListener('touchstart', () => container.style.opacity = '0.5');
                             container.addEventListener('touchend', () => setTimeout(() => container.style.opacity = '0', 1000));
-                            menuHidden = true;
                         }
                     }
                 };
@@ -118,10 +117,10 @@ class MainActivity : AppCompatActivity() {
                     video.dataset.casSetup = 'true';
 
                     const canvas = document.createElement('canvas');
-                    document.body.appendChild(canvas);
+                    video.parentNode.insertBefore(canvas, video);
                     video.style.visibility = 'hidden';
 
-                    const gl = canvas.getContext('webgl2');
+                    const gl = canvas.getContext('webgl2', { powerPreference: 'default' });
                     if (!gl) {
                         canvas.remove();
                         video.style.visibility = '';
@@ -129,7 +128,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     const vert = '#version 300 es\nin vec4 position;\nvoid main(){gl_Position=position;}';
-                    const frag = '#version 300 es\nprecision highp float;\nuniform sampler2D data;\nuniform vec2 iResolution;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=gl_FragCoord.xy/iResolution.xy;\n  vec2 ts=1.0/iResolution.xy;\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+ts*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+ts*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+ts*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+ts*vec2(0,-1)).rgb;\n  vec3 mn=min(min(min(d,e),min(f,b)),h);\n  vec3 mx=max(max(max(d,e),max(f,b)),h);\n  vec3 amp=clamp(min(mn,2.0-mx)/mx,0.0,1.0);\n  amp=inversesqrt(amp);\n  vec3 w=-(1.0/(amp*5.6));\n  vec3 rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 s=mix(e,o,sharpenFactor);\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  fragColor=vec4(mix(l,s,1.2),1.0);\n}';
+                    const frag = '#version 300 es\nprecision highp float;\nuniform sampler2D data;\nuniform vec2 iResolution;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=vec2(gl_FragCoord.x,iResolution.y-gl_FragCoord.y)/iResolution.xy;\n  vec2 ts=1.0/iResolution.xy;\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+ts*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+ts*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+ts*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+ts*vec2(0,-1)).rgb;\n  vec3 mn=min(min(min(d,e),min(f,b)),h);\n  vec3 mx=max(max(max(d,e),max(f,b)),h);\n  vec3 amp=clamp(min(mn,2.0-mx)/mx,0.0,1.0);\n  amp=inversesqrt(amp);\n  vec3 w=-(1.0/(amp*5.6));\n  vec3 rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 s=mix(e,o,sharpenFactor);\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  fragColor=vec4(mix(l,s,1.2),1.0);\n}';
 
                     const mkShader = (type, src) => {
                         const s = gl.createShader(type);
@@ -156,7 +155,7 @@ class MainActivity : AppCompatActivity() {
 
                     const tex = gl.createTexture();
                     gl.bindTexture(gl.TEXTURE_2D, tex);
-                    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -166,16 +165,23 @@ class MainActivity : AppCompatActivity() {
                     gl.uniform1f(gl.getUniformLocation(prog, 'sharpenFactor'), 0.5);
                     const resLoc = gl.getUniformLocation(prog, 'iResolution');
 
-                    const syncSize = () => {
+                    let syncTimer = null;
+                    const syncSize = () => { clearTimeout(syncTimer); syncTimer = setTimeout(_syncSize, 100); };
+                    const _syncSize = () => {
                         const r = video.getBoundingClientRect();
-                        canvas.width = video.videoWidth || Math.round(r.width);
-                        canvas.height = video.videoHeight || Math.round(r.height);
-                        canvas.style.cssText = 'position:fixed;top:' + r.top + 'px;left:' + r.left + 'px;width:' + r.width + 'px;height:' + r.height + 'px;pointer-events:none;z-index:9999;';
-                        gl.viewport(0, 0, canvas.width, canvas.height);
-                        gl.uniform2f(resLoc, canvas.width, canvas.height);
-                        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, canvas.width, canvas.height, 0, gl.RGB, gl.UNSIGNED_BYTE, null);
+                        const w = video.videoWidth || Math.round(r.width);
+                        const h = video.videoHeight || Math.round(r.height);
+                        if (canvas.width === w && canvas.height === h) return;
+                        canvas.width = w;
+                        canvas.height = h;
+                        canvas.style.cssText = 'position:fixed;top:' + r.top + 'px;left:' + r.left + 'px;width:' + r.width + 'px;height:' + r.height + 'px;pointer-events:none;';
+                        gl.viewport(0, 0, w, h);
+                        gl.uniform2f(resLoc, w, h);
                     };
-                    syncSize();
+                    _syncSize();
+
+                    video.addEventListener('loadedmetadata', syncSize);
+                    video.addEventListener('resize', syncSize);
 
                     const ro = new ResizeObserver(syncSize);
                     ro.observe(video);
@@ -185,7 +191,7 @@ class MainActivity : AppCompatActivity() {
 
                     const render = () => {
                         if (video.readyState >= 2) {
-                            gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGB, gl.UNSIGNED_BYTE, video);
+                            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
                             gl.drawArrays(gl.TRIANGLES, 0, 3);
                         }
                         frameHandle = useRVFC
@@ -199,6 +205,8 @@ class MainActivity : AppCompatActivity() {
                     video._casCleanup = () => {
                         if (useRVFC) video.cancelVideoFrameCallback(frameHandle);
                         else cancelAnimationFrame(frameHandle);
+                        video.removeEventListener('loadedmetadata', syncSize);
+                        video.removeEventListener('resize', syncSize);
                         ro.disconnect();
                         canvas.remove();
                         video.style.visibility = '';
@@ -210,21 +218,28 @@ class MainActivity : AppCompatActivity() {
                 let observerTimeout = null;
                 let pollInterval = null;
 
+                const foundVideo = (video) => {
+                    const menuObserver = new MutationObserver(() => {
+                        const toggle = document.querySelector('button[aria-label="Quick Actions Toggle"]');
+                        if (toggle) hideMenuButton();
+                    });
+                    menuObserver.observe(document.body, { childList: true, subtree: true });
+                    setupWebGLCAS(video);
+                    watchForVideoRemoval(video, menuObserver);
+                };
+
                 const startPolling = () => {
                     pollInterval = setInterval(() => {
-                        hideMenuButton();
                         const video = document.querySelector('video');
-                        if (video && menuHidden) {
+                        if (video) {
                             clearInterval(pollInterval);
                             pollInterval = null;
-                            setupWebGLCAS(video);
-                            watchForVideoRemoval(video);
+                            foundVideo(video);
                         }
                     }, 2000);
                 };
 
                 const startWatching = () => {
-                    menuHidden = false;
                     observer.observe(document.body, { childList: true, subtree: true });
                     observerTimeout = setTimeout(() => {
                         observer.disconnect();
@@ -232,12 +247,13 @@ class MainActivity : AppCompatActivity() {
                     }, 20000);
                 };
 
-                const watchForVideoRemoval = (video) => {
+                const watchForVideoRemoval = (video, menuObserver) => {
                     const parent = video.parentNode;
                     if (!parent) return;
                     const removalObserver = new MutationObserver(() => {
                         if (!document.contains(video)) {
                             removalObserver.disconnect();
+                            menuObserver.disconnect();
                             if (video._casCleanup) video._casCleanup();
                             startWatching();
                         }
@@ -246,24 +262,20 @@ class MainActivity : AppCompatActivity() {
                 };
 
                 const observer = new MutationObserver(() => {
-                    hideMenuButton();
                     const video = document.querySelector('video');
-                    if (video && menuHidden) {
+                    if (video) {
                         clearTimeout(observerTimeout);
-                        setupWebGLCAS(video);
                         observer.disconnect();
-                        watchForVideoRemoval(video);
+                        foundVideo(video);
                     }
                 });
 
                 startWatching();
-                hideMenuButton();
                 const video = document.querySelector('video');
                 if (video) {
                     clearTimeout(observerTimeout);
-                    setupWebGLCAS(video);
                     observer.disconnect();
-                    watchForVideoRemoval(video);
+                    foundVideo(video);
                 }
             })();
         """.trimIndent()
