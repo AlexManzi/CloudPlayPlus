@@ -23,6 +23,7 @@ class MainActivity : AppCompatActivity() {
 
         // Keep screen on while gaming
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        window.setSustainedPerformanceMode(true)
 
         // Limit to 60Hz to save battery
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -74,7 +75,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_BOUND, true)
+        webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_BOUND, false)
 
         setupBackHandler()
         webView.loadUrl("https://play.xbox.com/")
