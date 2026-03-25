@@ -48,6 +48,9 @@ class MainActivity : AppCompatActivity() {
 
         webView = findViewById(R.id.webview)
 
+        webView.overScrollMode = View.OVER_SCROLL_NEVER
+        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+
         // WebView settings
         webView.settings.apply {
             javaScriptEnabled = true
@@ -198,9 +201,8 @@ class MainActivity : AppCompatActivity() {
                     const syncSize = () => { clearTimeout(syncTimer); syncTimer = setTimeout(_syncSize, 100); };
                     const _syncSize = () => {
                         const r = video.getBoundingClientRect();
-                        const scale = .945;
-                        const w = Math.round((video.videoWidth || Math.round(r.width)) * scale);
-                        const h = Math.round((video.videoHeight || Math.round(r.height)) * scale);
+                        const w = Math.round(video.videoWidth || Math.round(r.width));
+                        const h = Math.round(video.videoHeight || Math.round(r.height));
                         if (canvas.width === w && canvas.height === h) return;
                         canvas.width = w;
                         canvas.height = h;
@@ -225,7 +227,7 @@ class MainActivity : AppCompatActivity() {
                             const t = video.currentTime;
                             if (t !== lastTime) {
                                 lastTime = t;
-                                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB8, gl.RGB, gl.UNSIGNED_BYTE, video);
+                                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, video);
                                 gl.drawArrays(gl.TRIANGLES, 0, 3);
                             }
                         }
