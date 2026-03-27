@@ -96,12 +96,8 @@ class MainActivity : AppCompatActivity() {
         webView.pauseTimers()
     }
 
-    override fun onStop() {
-        super.onStop()
-        CookieManager.getInstance().flush()
-    }
-
     override fun onDestroy() {
+        CookieManager.getInstance().flush()
         webView.webViewClient = WebViewClient()
         webView.webChromeClient = null
         webView.destroy()
@@ -159,7 +155,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     const vert = '#version 300 es\nin vec4 position;\nvoid main(){gl_Position=position;}';
-                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 iResolution;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=gl_FragCoord.xy/iResolution.xy;\n  vec2 ts=1.0/iResolution.xy;\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+ts*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+ts*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+ts*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+ts*vec2(0,-1)).rgb;\n  vec3 mn=min(min(min(d,e),min(f,b)),h);\n  vec3 mx=max(max(max(d,e),max(f,b)),h);\n  vec3 amp=clamp(min(mn,2.0-mx)/mx,0.0,1.0);\n  amp=inversesqrt(amp);\n  vec3 w=-(1.0/(amp*5.6));\n  vec3 rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 s=mix(e,o,sharpenFactor);\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  fragColor=vec4(mix(l,s,1.15),1.0);\n}';
+                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 iResolution;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=gl_FragCoord.xy/iResolution.xy;\n  vec2 ts=1.0/iResolution.xy;\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+ts*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+ts*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+ts*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+ts*vec2(0,-1)).rgb;\n  vec3 mn=min(min(min(d,e),min(f,b)),h);\n  vec3 mx=max(max(max(d,e),max(f,b)),h);\n  vec3 amp=clamp(min(mn,2.0-mx)/mx,0.0,1.0);\n  amp=inversesqrt(amp);\n  float luma=dot(e,vec3(0.299,0.587,0.114));\n  float wm=smoothstep(0.05,0.5,luma);\n  vec3 w=-(wm/(amp*5.6));\n  vec3 rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 s=mix(e,o,sharpenFactor);\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  fragColor=vec4(mix(l,s,1.1),1.0);\n}';
 
                     const mkShader = (type, src) => {
                         const s = gl.createShader(type);
@@ -215,7 +211,9 @@ class MainActivity : AppCompatActivity() {
                         canvas.height = h;
                         bridge.width = w;
                         bridge.height = h;
-                        canvas.style.cssText = 'position:fixed;z-index:99999;top:' + r.top + 'px;left:' + r.left + 'px;width:' + r.width + 'px;height:' + r.height + 'px;pointer-events:none;';
+                        const vz = parseInt(window.getComputedStyle(video).zIndex) || 0;
+                        const cz = isNaN(vz) ? 1 : vz + 1;
+                        canvas.style.cssText = 'position:fixed;z-index:' + cz + ';top:' + r.top + 'px;left:' + r.left + 'px;width:' + r.width + 'px;height:' + r.height + 'px;pointer-events:none;';
                         gl.viewport(0, 0, w, h);
                         gl.uniform2f(resLoc, w, h);
                     };
@@ -230,9 +228,20 @@ class MainActivity : AppCompatActivity() {
                     const useRVFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
                     let frameHandle = null;
                     let lastTime = -1;
+                    let lastTop = -1;
+                    let lastLeft = -1;
 
                     const render = () => {
                         if (video.readyState >= 2 && !video.paused && !document.hidden) {
+                            const r = video.getBoundingClientRect();
+                            if (r.top !== lastTop || r.left !== lastLeft) {
+                                lastTop = r.top;
+                                lastLeft = r.left;
+                                canvas.style.top = r.top + 'px';
+                                canvas.style.left = r.left + 'px';
+                                canvas.style.width = r.width + 'px';
+                                canvas.style.height = r.height + 'px';
+                            }
                             const t = video.currentTime;
                             if (t !== lastTime) {
                                 lastTime = t;
