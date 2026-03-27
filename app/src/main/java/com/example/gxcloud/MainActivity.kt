@@ -151,7 +151,7 @@ class MainActivity : AppCompatActivity() {
                     video.parentNode.insertBefore(canvas, video);
                     video.style.visibility = 'hidden';
 
-                    const gl = canvas.getContext('webgl2', { powerPreference: 'low-power', alpha: false, depth: false, stencil: false, preserveDrawingBuffer: false, antialias: false, desynchronized: true });
+                    const gl = canvas.getContext('webgl2', { powerPreference: 'high-performance', alpha: false, depth: false, stencil: false, preserveDrawingBuffer: false, antialias: false, desynchronized: true });
                     if (!gl) {
                         canvas.remove();
                         video.style.visibility = '';
@@ -159,7 +159,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     const vert = '#version 300 es\nin vec4 position;\nvoid main(){gl_Position=position;}';
-                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 iResolution;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=vec2(gl_FragCoord.x,iResolution.y-gl_FragCoord.y)/iResolution.xy;\n  vec2 ts=1.0/iResolution.xy;\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+ts*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+ts*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+ts*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+ts*vec2(0,-1)).rgb;\n  vec3 mn=min(min(min(d,e),min(f,b)),h);\n  vec3 mx=max(max(max(d,e),max(f,b)),h);\n  vec3 amp=clamp(min(mn,2.0-mx)/mx,0.0,1.0);\n  amp=inversesqrt(amp);\n  vec3 w=-(1.0/(amp*8.0));\n  vec3 rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  float contrast=dot(mx-mn,vec3(0.299,0.587,0.114));\n  float adaptive=smoothstep(0.02,0.25,contrast);\n  vec3 s=mix(e,o,0.5*adaptive);\n  vec3 lum=vec3(dot(s,vec3(0.299,0.587,0.114)));\n  s=mix(lum,s,1.2);\n  fragColor=vec4(s,1.0);\n}';
+                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 iResolution;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=gl_FragCoord.xy/iResolution.xy;\n  vec2 ts=1.0/iResolution.xy;\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+ts*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+ts*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+ts*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+ts*vec2(0,-1)).rgb;\n  vec3 mn=min(min(min(d,e),min(f,b)),h);\n  vec3 mx=max(max(max(d,e),max(f,b)),h);\n  vec3 amp=clamp(min(mn,2.0-mx)/mx,0.0,1.0);\n  amp=inversesqrt(amp);\n  vec3 w=-(1.0/(amp*5.6));\n  vec3 rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 s=mix(e,o,sharpenFactor);\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  fragColor=vec4(mix(l,s,1.2),1.0);\n}';
 
                     const mkShader = (type, src) => {
                         const s = gl.createShader(type);
@@ -191,12 +191,18 @@ class MainActivity : AppCompatActivity() {
                     const tex = gl.createTexture();
                     gl.bindTexture(gl.TEXTURE_2D, tex);
 
+                    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                    gl.activeTexture(gl.TEXTURE0);
                     gl.uniform1i(gl.getUniformLocation(prog, 'data'), 0);
                     const resLoc = gl.getUniformLocation(prog, 'iResolution');
+                    gl.uniform1f(gl.getUniformLocation(prog, 'sharpenFactor'), 0.6);
+
+                    const bridge = document.createElement('canvas');
+                    const bridgeCtx = bridge.getContext('2d');
 
                     let syncTimer = null;
                     const syncSize = () => { clearTimeout(syncTimer); syncTimer = setTimeout(_syncSize, 100); };
@@ -207,7 +213,9 @@ class MainActivity : AppCompatActivity() {
                         if (canvas.width === w && canvas.height === h) return;
                         canvas.width = w;
                         canvas.height = h;
-                        canvas.style.cssText = 'position:fixed;top:' + r.top + 'px;left:' + r.left + 'px;width:' + r.width + 'px;height:' + r.height + 'px;pointer-events:none;';
+                        bridge.width = w;
+                        bridge.height = h;
+                        canvas.style.cssText = 'position:fixed;z-index:99999;top:' + r.top + 'px;left:' + r.left + 'px;width:' + r.width + 'px;height:' + r.height + 'px;pointer-events:none;';
                         gl.viewport(0, 0, w, h);
                         gl.uniform2f(resLoc, w, h);
                     };
@@ -228,7 +236,8 @@ class MainActivity : AppCompatActivity() {
                             const t = video.currentTime;
                             if (t !== lastTime) {
                                 lastTime = t;
-                                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, video);
+                                bridgeCtx.drawImage(video, 0, 0, bridge.width, bridge.height);
+                                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, bridge);
                                 gl.drawArrays(gl.TRIANGLES, 0, 3);
                             }
                         }
@@ -248,6 +257,7 @@ class MainActivity : AppCompatActivity() {
                         video.removeEventListener('resize', syncSize);
                         ro.disconnect();
                         canvas.remove();
+                        bridge.width = 1; bridge.height = 1;
                         gl.getExtension('WEBGL_lose_context')?.loseContext();
                         video.style.visibility = '';
                         delete video.dataset.casSetup;
