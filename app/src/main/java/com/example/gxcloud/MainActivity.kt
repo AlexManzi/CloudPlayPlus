@@ -23,7 +23,7 @@ class MainActivity : AppCompatActivity() {
 
         // Keep screen on while gaming
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        window.setSustainedPerformanceMode(true)
+
 
         // Limit to 60Hz to save battery
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -58,7 +58,7 @@ class MainActivity : AppCompatActivity() {
             javaScriptEnabled = true
             domStorageEnabled = true
             mediaPlaybackRequiresUserGesture = false
-            userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0"
             safeBrowsingEnabled = false
             setGeolocationEnabled(false)
             allowContentAccess = false
@@ -151,7 +151,7 @@ class MainActivity : AppCompatActivity() {
                     video.parentNode.insertBefore(canvas, video);
                     video.style.visibility = 'hidden';
 
-                    const gl = canvas.getContext('webgl2', { powerPreference: 'high-performance', alpha: false, depth: false, stencil: false, preserveDrawingBuffer: false, antialias: false, desynchronized: true });
+                    const gl = canvas.getContext('webgl2', { powerPreference: 'low-power', alpha: false, depth: false, stencil: false, preserveDrawingBuffer: false, antialias: false, desynchronized: false });
                     if (!gl) {
                         canvas.remove();
                         video.style.visibility = '';
@@ -159,7 +159,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     const vert = '#version 300 es\nin vec4 position;\nvoid main(){gl_Position=position;}';
-                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 iResolution;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=gl_FragCoord.xy/iResolution.xy;\n  vec2 ts=1.0/iResolution.xy;\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+ts*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+ts*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+ts*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+ts*vec2(0,-1)).rgb;\n  vec3 mn=min(min(min(d,e),min(f,b)),h);\n  vec3 mx=max(max(max(d,e),max(f,b)),h);\n  vec3 amp=clamp(min(mn,2.0-mx)/mx,0.0,1.0);\n  amp=inversesqrt(amp);\n  vec3 w=-(1.0/(amp*5.6));\n  vec3 rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 s=mix(e,o,sharpenFactor);\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  fragColor=vec4(mix(l,s,1.2),1.0);\n}';
+                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 iResolution;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=gl_FragCoord.xy/iResolution.xy;\n  vec2 ts=1.0/iResolution.xy;\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+ts*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+ts*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+ts*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+ts*vec2(0,-1)).rgb;\n  vec3 mn=min(min(min(d,e),min(f,b)),h);\n  vec3 mx=max(max(max(d,e),max(f,b)),h);\n  vec3 amp=clamp(min(mn,2.0-mx)/mx,0.0,1.0);\n  amp=inversesqrt(amp);\n  vec3 w=-(1.0/(amp*5.6));\n  vec3 rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 s=mix(e,o,sharpenFactor);\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  fragColor=vec4(mix(l,s,1.15),1.0);\n}';
 
                     const mkShader = (type, src) => {
                         const s = gl.createShader(type);
@@ -199,7 +199,7 @@ class MainActivity : AppCompatActivity() {
                     gl.activeTexture(gl.TEXTURE0);
                     gl.uniform1i(gl.getUniformLocation(prog, 'data'), 0);
                     const resLoc = gl.getUniformLocation(prog, 'iResolution');
-                    gl.uniform1f(gl.getUniformLocation(prog, 'sharpenFactor'), 0.6);
+                    gl.uniform1f(gl.getUniformLocation(prog, 'sharpenFactor'), 0.35);
 
                     const bridge = document.createElement('canvas');
                     const bridgeCtx = bridge.getContext('2d');
