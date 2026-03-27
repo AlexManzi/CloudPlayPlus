@@ -155,7 +155,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     const vert = '#version 300 es\nin vec4 position;\nvoid main(){gl_Position=position;}';
-                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 iResolution;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=gl_FragCoord.xy/iResolution.xy;\n  vec2 ts=1.0/iResolution.xy;\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+ts*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+ts*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+ts*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+ts*vec2(0,-1)).rgb;\n  vec3 mn=min(min(min(d,e),min(f,b)),h);\n  vec3 mx=max(max(max(d,e),max(f,b)),h);\n  vec3 amp=clamp(min(mn,2.0-mx)/mx,0.0,1.0);\n  amp=inversesqrt(amp);\n  float luma=dot(e,vec3(0.299,0.587,0.114));\n  float wm=smoothstep(0.05,0.5,luma);\n  vec3 w=-(wm/(amp*5.6));\n  vec3 rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 s=mix(e,o,sharpenFactor);\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  fragColor=vec4(mix(l,s,1.1),1.0);\n}';
+                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 iResolution;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=gl_FragCoord.xy/iResolution.xy;\n  vec2 ts=1.0/iResolution.xy;\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+ts*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+ts*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+ts*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+ts*vec2(0,-1)).rgb;\n  vec3 mn=min(min(min(d,e),min(f,b)),h);\n  vec3 mx=max(max(max(d,e),max(f,b)),h);\n  vec3 amp=clamp(min(mn,2.0-mx)/mx,0.0,1.0);\n  amp=inversesqrt(amp);\n  float luma=e.g;\n  float wm=smoothstep(0.05,0.5,luma);\n  vec3 w=-(wm/(amp*5.6));\n  vec3 rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 s=mix(e,o,sharpenFactor);\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  fragColor=vec4(mix(vec3(s.g),s,1.1),1.0);\n}';
 
                     const mkShader = (type, src) => {
                         const s = gl.createShader(type);
@@ -198,7 +198,7 @@ class MainActivity : AppCompatActivity() {
                     gl.uniform1f(gl.getUniformLocation(prog, 'sharpenFactor'), 0.35);
 
                     const bridge = document.createElement('canvas');
-                    const bridgeCtx = bridge.getContext('2d');
+                    const bridgeCtx = bridge.getContext('2d', { alpha: false, desynchronized: true });
 
                     let syncTimer = null;
                     const syncSize = () => { clearTimeout(syncTimer); syncTimer = setTimeout(_syncSize, 100); };
@@ -207,10 +207,8 @@ class MainActivity : AppCompatActivity() {
                         const w = Math.round(video.videoWidth || Math.round(r.width));
                         const h = Math.round(video.videoHeight || Math.round(r.height));
                         if (canvas.width === w && canvas.height === h) return;
-                        canvas.width = w;
-                        canvas.height = h;
-                        bridge.width = w;
-                        bridge.height = h;
+                        canvas.width = bridge.width = w;
+                        canvas.height = bridge.height = h;
                         const vz = parseInt(window.getComputedStyle(video).zIndex) || 0;
                         const cz = isNaN(vz) ? 1 : vz + 1;
                         canvas.style.cssText = 'position:fixed;z-index:' + cz + ';top:' + r.top + 'px;left:' + r.left + 'px;width:' + r.width + 'px;height:' + r.height + 'px;pointer-events:none;';
@@ -227,7 +225,6 @@ class MainActivity : AppCompatActivity() {
 
                     const useRVFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
                     let frameHandle = null;
-                    let lastTime = -1;
                     let lastTop = -1;
                     let lastLeft = -1;
 
@@ -242,13 +239,9 @@ class MainActivity : AppCompatActivity() {
                                 canvas.style.width = r.width + 'px';
                                 canvas.style.height = r.height + 'px';
                             }
-                            const t = video.currentTime;
-                            if (t !== lastTime) {
-                                lastTime = t;
-                                bridgeCtx.drawImage(video, 0, 0, bridge.width, bridge.height);
-                                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, bridge);
-                                gl.drawArrays(gl.TRIANGLES, 0, 3);
-                            }
+                            bridgeCtx.drawImage(video, 0, 0, bridge.width, bridge.height);
+                            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, bridge);
+                            gl.drawArrays(gl.TRIANGLES, 0, 3);
                         }
                         frameHandle = useRVFC
                             ? video.requestVideoFrameCallback(render)
