@@ -24,7 +24,6 @@ class MainActivity : AppCompatActivity() {
         // Keep screen on while gaming
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-
         // Limit to 60Hz to save battery
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val mode = display?.supportedModes
@@ -158,7 +157,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     const vert = '#version 300 es\nin vec4 position;\nvoid main(){gl_Position=position;}';
-                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 iResolution;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=gl_FragCoord.xy/iResolution.xy;\n  vec2 ts=1.0/iResolution.xy;\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+ts*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+ts*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+ts*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+ts*vec2(0,-1)).rgb;\n  vec3 mn3=min(min(min(d,e),min(f,b)),h);\n  vec3 mx3=max(max(max(d,e),max(f,b)),h);\n  float mn_l=dot(mn3,vec3(0.2126,0.7152,0.0722));\n  float mx_l=dot(mx3,vec3(0.2126,0.7152,0.0722));\n  float amp=sqrt(clamp(min(mn_l,2.0-mx_l)/(mx_l+0.01),0.0,1.0));\n  float luma=dot(e,vec3(0.2126,0.7152,0.0722));\n  float wm=smoothstep(0.05,0.5,luma);\n  float w=-(wm*amp/8.0);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 s=mix(e,o,sharpenFactor);\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  fragColor=vec4(clamp(mix(l,s,1.1),0.0,1.0),1.0);\n}';
+                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 iResolution;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=vec2(gl_FragCoord.x,iResolution.y-gl_FragCoord.y)/iResolution.xy;\n  vec2 ts=1.0/iResolution.xy;\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+ts*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+ts*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+ts*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+ts*vec2(0,-1)).rgb;\n  vec3 mn3=min(min(min(d,e),min(f,b)),h);\n  vec3 mx3=max(max(max(d,e),max(f,b)),h);\n  float mn_l=dot(mn3,vec3(0.2126,0.7152,0.0722));\n  float mx_l=dot(mx3,vec3(0.2126,0.7152,0.0722));\n  float amp=sqrt(clamp(min(mn_l,2.0-mx_l)/(mx_l+0.01),0.0,1.0));\n  float luma=dot(e,vec3(0.2126,0.7152,0.0722));\n  float wm=smoothstep(0.05,0.5,luma);\n  float w=-(wm*amp/8.0);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 s=mix(e,o,sharpenFactor);\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  fragColor=vec4(clamp(mix(l,s,1.1),0.0,1.0),1.0);\n}';
 
                     const mkShader = (type, src) => {
                         const s = gl.createShader(type);
@@ -190,7 +189,7 @@ class MainActivity : AppCompatActivity() {
                     const tex = gl.createTexture();
                     gl.bindTexture(gl.TEXTURE_2D, tex);
 
-                    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+                    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
