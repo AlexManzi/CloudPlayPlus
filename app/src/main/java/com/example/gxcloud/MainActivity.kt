@@ -46,9 +46,8 @@ class MainActivity : AppCompatActivity() {
 
         setContentView(R.layout.activity_main)
 
-        window.colorMode = android.content.pm.ActivityInfo.COLOR_MODE_DEFAULT
-
         webView = findViewById(R.id.webview)
+        WebView.setWebContentsDebuggingEnabled(false)
 
         webView.overScrollMode = View.OVER_SCROLL_NEVER
         webView.setBackgroundColor(android.graphics.Color.BLACK)
@@ -66,6 +65,8 @@ class MainActivity : AppCompatActivity() {
             setSupportZoom(false)
             builtInZoomControls = false
             textZoom = 100
+            databaseEnabled = false
+            allowFileAccess = false
         }
 
         // Allow cookies
@@ -157,7 +158,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     const vert = '#version 300 es\nin vec4 position;\nvoid main(){gl_Position=position;}';
-                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 iResolution;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=gl_FragCoord.xy/iResolution.xy;\n  vec2 ts=1.0/iResolution.xy;\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+ts*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+ts*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+ts*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+ts*vec2(0,-1)).rgb;\n  vec3 mn=min(min(min(d,e),min(f,b)),h);\n  vec3 mx=max(max(max(d,e),max(f,b)),h);\n  vec3 amp=sqrt(clamp(min(mn,2.0-mx)/mx,0.0,1.0));\n  float luma=dot(e,vec3(0.2126,0.7152,0.0722));\n  float wm=smoothstep(0.05,0.5,luma);\n  vec3 w=-(wm*amp/8.0);\n  vec3 rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 s=mix(e,o,sharpenFactor);\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  fragColor=vec4(clamp(mix(l,s,1.1),0.0,1.0),1.0);\n}';
+                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 iResolution;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=gl_FragCoord.xy/iResolution.xy;\n  vec2 ts=1.0/iResolution.xy;\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+ts*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+ts*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+ts*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+ts*vec2(0,-1)).rgb;\n  vec3 mn3=min(min(min(d,e),min(f,b)),h);\n  vec3 mx3=max(max(max(d,e),max(f,b)),h);\n  float mn_l=dot(mn3,vec3(0.2126,0.7152,0.0722));\n  float mx_l=dot(mx3,vec3(0.2126,0.7152,0.0722));\n  float amp=sqrt(clamp(min(mn_l,2.0-mx_l)/(mx_l+0.01),0.0,1.0));\n  float luma=dot(e,vec3(0.2126,0.7152,0.0722));\n  float wm=smoothstep(0.05,0.5,luma);\n  float w=-(wm*amp/8.0);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 s=mix(e,o,sharpenFactor);\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  fragColor=vec4(clamp(mix(l,s,1.1),0.0,1.0),1.0);\n}';
 
                     const mkShader = (type, src) => {
                         const s = gl.createShader(type);
