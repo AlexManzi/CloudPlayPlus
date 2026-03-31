@@ -163,17 +163,31 @@ class MainActivity : AppCompatActivity() {
                         const s = gl.createShader(type);
                         gl.shaderSource(s, src);
                         gl.compileShader(s);
+                        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+                            gl.deleteShader(s);
+                            return null;
+                        }
                         return s;
                     };
 
                     const prog = gl.createProgram();
                     const vs = mkShader(gl.VERTEX_SHADER, vert);
                     const fs = mkShader(gl.FRAGMENT_SHADER, frag);
+                    if (!vs || !fs) {
+                        canvas.remove();
+                        video.style.visibility = '';
+                        return;
+                    }
                     gl.attachShader(prog, vs);
                     gl.attachShader(prog, fs);
                     gl.linkProgram(prog);
                     gl.detachShader(prog, vs); gl.deleteShader(vs);
                     gl.detachShader(prog, fs); gl.deleteShader(fs);
+                    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+                        canvas.remove();
+                        video.style.visibility = '';
+                        return;
+                    }
                     gl.useProgram(prog);
 
                     const vao = gl.createVertexArray();
@@ -200,7 +214,7 @@ class MainActivity : AppCompatActivity() {
                     gl.uniform1f(gl.getUniformLocation(prog, 'sharpenFactor'), 0.3);
 
                     const bridge = document.createElement('canvas');
-                    const bridgeCtx = bridge.getContext('2d', { alpha: false, desynchronized: true });
+                    const bridgeCtx = bridge.getContext('2d', { alpha: false, desynchronized: true, willReadFrequently: false });
 
                     let syncTimer = null;
                     const syncSize = () => { clearTimeout(syncTimer); syncTimer = setTimeout(_syncSize, 200); };
@@ -213,7 +227,7 @@ class MainActivity : AppCompatActivity() {
                         canvas.height = bridge.height = h;
                         const vz = parseInt(window.getComputedStyle(video).zIndex) || 0;
                         const cz = isNaN(vz) ? 1 : vz + 1;
-                        canvas.style.cssText = 'position:fixed;z-index:' + cz + ';top:' + r.top + 'px;left:' + r.left + 'px;width:' + r.width + 'px;height:' + r.height + 'px;pointer-events:none;';
+                        canvas.style.cssText = 'position:fixed;z-index:' + cz + ';top:' + Math.round(r.top) + 'px;left:' + Math.round(r.left) + 'px;width:' + Math.round(r.width) + 'px;height:' + Math.round(r.height) + 'px;pointer-events:none;';
                         gl.viewport(0, 0, w, h);
                         gl.uniform2f(resLoc, w, h);
                     };
@@ -233,13 +247,15 @@ class MainActivity : AppCompatActivity() {
                     const render = () => {
                         if (video.readyState >= 2 && !video.paused && !document.hidden) {
                             const r = video.getBoundingClientRect();
-                            if (r.top !== lastTop || r.left !== lastLeft) {
-                                lastTop = r.top;
-                                lastLeft = r.left;
-                                canvas.style.top = r.top + 'px';
-                                canvas.style.left = r.left + 'px';
-                                canvas.style.width = r.width + 'px';
-                                canvas.style.height = r.height + 'px';
+                            const top = Math.round(r.top);
+                            const left = Math.round(r.left);
+                            if (top !== lastTop || left !== lastLeft) {
+                                lastTop = top;
+                                lastLeft = left;
+                                canvas.style.top = top + 'px';
+                                canvas.style.left = left + 'px';
+                                canvas.style.width = Math.round(r.width) + 'px';
+                                canvas.style.height = Math.round(r.height) + 'px';
                             }
                             bridgeCtx.drawImage(video, 0, 0, bridge.width, bridge.height);
                             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, bridge);
