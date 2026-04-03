@@ -8,7 +8,7 @@ CloudPlayPlus focuses on simplicity, performance, and a clean experience—ideal
 ## 🚀 Features
 
 - **Instant Launch** — Opens Xbox Cloud Gaming quickly without extra UI clutter.
-- **AMD FidelityFX CAS** — CloudPlayPlus applies AMD's Contrast Adaptive Sharpening (CAS) algorithm via a WebGL2 fragment shader to make Xbox Cloud Gaming streams clearer. CAS reduces the soft, blurred look of video-based streaming and improves text and UI crispness without adding latency, while maintaining strong battery life.
+- **AMD FidelityFX CAS** — CloudPlayPlus applies AMD's Contrast Adaptive Sharpening (CAS) algorithm via a WebGL2 fragment shader to make Xbox Cloud Gaming streams clearer. CAS reduces the soft, blurred look of video-based streaming and improves text and UI crispness without adding latency. The shader uses luma-weighted sharpening (suppressing sharpening in dark areas to avoid noise amplification) and hooks into `requestVideoFrameCallback` for frame-accurate rendering. Runs with a `low-power` WebGL context to preserve battery life.
 - **Lightweight** — Built with Kotlin and minimal dependencies, <800kb app size>.  
 - **Android‑Native** — Uses modern Android tooling (Gradle Kotlin DSL, AndroidX).  
 - **Open Source** — Simple codebase designed for learning, modding, and extending.
@@ -31,8 +31,8 @@ CloudPlayPlus focuses on simplicity, performance, and a clean experience—ideal
      ./gradlew assembleDebug
      ```
 
-### **Option 2: Install APK (Coming Soon)**
-Releases will be published under the **Releases** tab once the project stabilizes.
+### **Option 2: Install APK**
+Download the latest APK from the **[Releases](https://github.com/AlexManzi/CloudPlayPlus/releases)** tab and sideload it onto your device.
 
 ---
 
