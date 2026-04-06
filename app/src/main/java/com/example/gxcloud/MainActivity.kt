@@ -1,8 +1,11 @@
 package com.example.gxcloud
 
 import android.annotation.SuppressLint
+import android.content.pm.ActivityInfo
 import android.os.Build
 import android.os.Bundle
+import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.webkit.CookieManager
@@ -20,6 +23,8 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
 
         // Keep screen on while gaming
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -49,6 +54,9 @@ class MainActivity : AppCompatActivity() {
         WebView.setWebContentsDebuggingEnabled(false)
 
         webView.overScrollMode = View.OVER_SCROLL_NEVER
+        webView.isVerticalScrollBarEnabled = false
+        webView.isFocusableInTouchMode = true
+        webView.requestFocus()
         webView.setBackgroundColor(android.graphics.Color.BLACK)
         window.decorView.setBackgroundColor(android.graphics.Color.BLACK)
         webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
@@ -105,6 +113,28 @@ class MainActivity : AppCompatActivity() {
         webView.webChromeClient = null
         webView.destroy()
         super.onDestroy()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+            )
+        }
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        return webView.dispatchKeyEvent(event) || super.dispatchKeyEvent(event)
+    }
+
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        return webView.dispatchGenericMotionEvent(event) || super.dispatchGenericMotionEvent(event)
     }
 
     private fun setupBackHandler() {
