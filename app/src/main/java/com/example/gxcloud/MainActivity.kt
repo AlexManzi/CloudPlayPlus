@@ -55,6 +55,7 @@ class MainActivity : AppCompatActivity() {
 
         webView.overScrollMode = View.OVER_SCROLL_NEVER
         webView.isVerticalScrollBarEnabled = false
+        webView.isFocusable = true
         webView.isFocusableInTouchMode = true
         webView.requestFocus()
         webView.setBackgroundColor(android.graphics.Color.BLACK)
@@ -188,9 +189,12 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     gl.disable(gl.DITHER);
+                    gl.disable(gl.BLEND);
+                    gl.disable(gl.DEPTH_TEST);
+                    gl.disable(gl.STENCIL_TEST);
 
                     const vert = '#version 300 es\nin vec4 position;\nvoid main(){gl_Position=position;}';
-                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 iResolution;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=vec2(gl_FragCoord.x,iResolution.y-gl_FragCoord.y)/iResolution.xy;\n  vec2 ts=1.0/iResolution.xy;\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+ts*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+ts*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+ts*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+ts*vec2(0,-1)).rgb;\n  vec3 mn3=min(min(min(d,e),min(f,b)),h);\n  vec3 mx3=max(max(max(d,e),max(f,b)),h);\n  float mn_l=dot(mn3,vec3(0.2126,0.7152,0.0722));\n  float mx_l=dot(mx3,vec3(0.2126,0.7152,0.0722));\n  float amp=sqrt(clamp(min(mn_l,2.0-mx_l)/(mx_l+0.01),0.0,1.0));\n  float luma=dot(e,vec3(0.2126,0.7152,0.0722));\n  float wm=smoothstep(0.05,0.5,luma);\n  float cg=smoothstep(0.02,0.08,mx_l-mn_l);\n  float w=-(wm*amp*cg/8.0);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 det=o-e;\n  vec3 lim=det/(1.0+abs(det)*4.0);\n  vec3 s=e+lim*sharpenFactor;\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  float satBoost=mix(1.0,1.1,wm);\n  fragColor=vec4(clamp(mix(l,s,satBoost),0.0,1.0),1.0);\n}';
+                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 texelSize;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=vec2(gl_FragCoord.x*texelSize.x,1.0-gl_FragCoord.y*texelSize.y);\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+texelSize*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+texelSize*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+texelSize*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+texelSize*vec2(0,-1)).rgb;\n  vec3 mn3=min(min(min(d,e),min(f,b)),h);\n  vec3 mx3=max(max(max(d,e),max(f,b)),h);\n  float mn_l=dot(mn3,vec3(0.2126,0.7152,0.0722));\n  float mx_l=dot(mx3,vec3(0.2126,0.7152,0.0722));\n  float amp=sqrt(clamp(min(mn_l,2.0-mx_l)/(mx_l+0.01),0.0,1.0));\n  float luma=dot(e,vec3(0.2126,0.7152,0.0722));\n  float wm=smoothstep(0.05,0.5,luma);\n  float cg=smoothstep(0.02,0.08,mx_l-mn_l);\n  float w=-(wm*amp*cg/8.0);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 det=o-e;\n  vec3 lim=det/(1.0+abs(det)*4.0);\n  vec3 s=e+lim*sharpenFactor;\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  float satBoost=mix(1.0,1.1,wm);\n  fragColor=vec4(clamp(mix(l,s,satBoost),0.0,1.0),1.0);\n}';
 
                     const mkShader = (type, src) => {
                         const s = gl.createShader(type);
@@ -243,11 +247,12 @@ class MainActivity : AppCompatActivity() {
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
                     gl.activeTexture(gl.TEXTURE0);
                     gl.uniform1i(gl.getUniformLocation(prog, 'data'), 0);
-                    const resLoc = gl.getUniformLocation(prog, 'iResolution');
+                    const texelSizeLoc = gl.getUniformLocation(prog, 'texelSize');
                     gl.uniform1f(gl.getUniformLocation(prog, 'sharpenFactor'), 0.33);
 
                     const bridge = document.createElement('canvas');
                     const bridgeCtx = bridge.getContext('2d', { alpha: false, desynchronized: true, willReadFrequently: false });
+                    bridgeCtx.imageSmoothingEnabled = false;
 
                     let syncTimer = null;
                     const syncSize = () => { clearTimeout(syncTimer); syncTimer = setTimeout(_syncSize, 200); };
@@ -262,7 +267,7 @@ class MainActivity : AppCompatActivity() {
                         const cz = isNaN(vz) ? 1 : vz + 1;
                         canvas.style.cssText = 'position:fixed;z-index:' + cz + ';top:' + Math.round(r.top) + 'px;left:' + Math.round(r.left) + 'px;width:' + Math.round(r.width) + 'px;height:' + Math.round(r.height) + 'px;pointer-events:none;';
                         gl.viewport(0, 0, w, h);
-                        gl.uniform2f(resLoc, w, h);
+                        gl.uniform2f(texelSizeLoc, 1.0/w, 1.0/h);
                     };
                     _syncSize();
 
