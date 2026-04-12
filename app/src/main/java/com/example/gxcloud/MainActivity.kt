@@ -55,12 +55,11 @@ class MainActivity : AppCompatActivity() {
 
         webView.overScrollMode = View.OVER_SCROLL_NEVER
         webView.isVerticalScrollBarEnabled = false
-        webView.isFocusable = true
         webView.isFocusableInTouchMode = true
         webView.requestFocus()
         webView.setBackgroundColor(android.graphics.Color.BLACK)
         window.decorView.setBackgroundColor(android.graphics.Color.BLACK)
-        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        webView.setLayerType(View.LAYER_TYPE_NONE, null)
 
         // WebView settings
         webView.settings.apply {
@@ -152,6 +151,28 @@ class MainActivity : AppCompatActivity() {
                 if (window.__gxcloudInjected) return;
                 window.__gxcloudInjected = true;
 
+                const __nativeFetch = window.fetch;
+                window.fetch = function(input, init) {
+                    const url = (input instanceof Request ? input.url : String(input));
+                    if (url.includes('/sessions/cloud/play') && (!init || !init.method || init.method.toUpperCase() === 'POST')) {
+                        try {
+                            const req = input instanceof Request ? input : new Request(input, init);
+                            return req.json().then(body => {
+                                if (body.settings) body.settings.osName = 'tizen';
+                                const deviceInfo = JSON.stringify({
+                                    appInfo: { env: { clientAppId: window.location.host, clientAppType: 'browser', clientAppVersion: '26.1.97', clientSdkVersion: '10.3.7', httpEnvironment: 'prod', sdkInstallId: '' } },
+                                    dev: { os: { name: 'tizen', ver: '2.1.0', platform: 'desktop' }, hw: { make: 'Samsung', model: 'unknown', sdktype: 'web' }, browser: { browserName: 'chrome', browserVersion: '140.0.3485.54' }, displayInfo: { dimensions: { widthInPixels: 4096, heightInPixels: 2160 }, pixelDensity: { dpiX: 1, dpiY: 1 } } }
+                                });
+                                const headers = {};
+                                req.headers.forEach((v, k) => { headers[k] = v; });
+                                headers['x-ms-device-info'] = deviceInfo;
+                                return __nativeFetch(new Request(req.url, { method: 'POST', headers, body: JSON.stringify(body), credentials: req.credentials, mode: req.mode }));
+                            });
+                        } catch(e) {}
+                    }
+                    return __nativeFetch.apply(this, arguments);
+                };
+
                 const quadVerts = new Float32Array([-1,-1,3,-1,-1,3]);
 
                 const style = document.createElement('style');
@@ -189,12 +210,9 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     gl.disable(gl.DITHER);
-                    gl.disable(gl.BLEND);
-                    gl.disable(gl.DEPTH_TEST);
-                    gl.disable(gl.STENCIL_TEST);
 
                     const vert = '#version 300 es\nin vec4 position;\nvoid main(){gl_Position=position;}';
-                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 texelSize;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=vec2(gl_FragCoord.x*texelSize.x,1.0-gl_FragCoord.y*texelSize.y);\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+texelSize*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+texelSize*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+texelSize*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+texelSize*vec2(0,-1)).rgb;\n  vec3 mn3=min(min(min(d,e),min(f,b)),h);\n  vec3 mx3=max(max(max(d,e),max(f,b)),h);\n  float mn_l=dot(mn3,vec3(0.2126,0.7152,0.0722));\n  float mx_l=dot(mx3,vec3(0.2126,0.7152,0.0722));\n  float amp=sqrt(clamp(min(mn_l,2.0-mx_l)/(mx_l+0.01),0.0,1.0));\n  float luma=dot(e,vec3(0.2126,0.7152,0.0722));\n  float wm=smoothstep(0.05,0.5,luma);\n  float cg=smoothstep(0.02,0.08,mx_l-mn_l);\n  float w=-(wm*amp*cg/8.0);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 det=o-e;\n  vec3 lim=det/(1.0+abs(det)*4.0);\n  vec3 s=e+lim*sharpenFactor;\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  float satBoost=mix(1.0,1.1,wm);\n  fragColor=vec4(clamp(mix(l,s,satBoost),0.0,1.0),1.0);\n}';
+                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 texelSize;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=vec2(gl_FragCoord.x*texelSize.x,1.0-gl_FragCoord.y*texelSize.y);\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+texelSize*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+texelSize*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+texelSize*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+texelSize*vec2(0,-1)).rgb;\n  vec3 mn3=min(min(min(d,e),min(f,b)),h);\n  vec3 mx3=max(max(max(d,e),max(f,b)),h);\n  float mn_l=dot(mn3,vec3(0.2126,0.7152,0.0722));\n  float mx_l=dot(mx3,vec3(0.2126,0.7152,0.0722));\n  float amp=sqrt(clamp(min(mn_l,2.0-mx_l)/(mx_l+0.01),0.0,1.0));\n  float luma=dot(e,vec3(0.2126,0.7152,0.0722));\n  float wm=smoothstep(0.05,0.5,luma);\n  float cg=smoothstep(0.02,0.08,mx_l-mn_l);\n  float w=-(wm*amp*cg/8.0);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 det=o-e;\n  vec3 lim=det/(1.0+abs(det)*4.0);\n  vec3 s=e+lim*sharpenFactor;\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  float satBoost=1.40;\n  fragColor=vec4(clamp(mix(l,s,satBoost),0.0,1.0),1.0);\n}';
 
                     const mkShader = (type, src) => {
                         const s = gl.createShader(type);
@@ -248,11 +266,10 @@ class MainActivity : AppCompatActivity() {
                     gl.activeTexture(gl.TEXTURE0);
                     gl.uniform1i(gl.getUniformLocation(prog, 'data'), 0);
                     const texelSizeLoc = gl.getUniformLocation(prog, 'texelSize');
-                    gl.uniform1f(gl.getUniformLocation(prog, 'sharpenFactor'), 0.33);
+                    gl.uniform1f(gl.getUniformLocation(prog, 'sharpenFactor'), 0.35);
 
                     const bridge = document.createElement('canvas');
                     const bridgeCtx = bridge.getContext('2d', { alpha: false, desynchronized: true, willReadFrequently: false });
-                    bridgeCtx.imageSmoothingEnabled = false;
 
                     let syncTimer = null;
                     const syncSize = () => { clearTimeout(syncTimer); syncTimer = setTimeout(_syncSize, 200); };
