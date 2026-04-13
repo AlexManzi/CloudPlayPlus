@@ -154,21 +154,21 @@ class MainActivity : AppCompatActivity() {
                 const __nativeFetch = window.fetch;
                 window.fetch = function(input, init) {
                     const url = (input instanceof Request ? input.url : String(input));
-                    if (url.includes('/sessions/cloud/play') && (!init || !init.method || init.method.toUpperCase() === 'POST')) {
-                        try {
-                            const req = input instanceof Request ? input : new Request(input, init);
-                            return req.json().then(body => {
-                                if (body.settings) body.settings.osName = 'tizen';
-                                const deviceInfo = JSON.stringify({
-                                    appInfo: { env: { clientAppId: window.location.host, clientAppType: 'browser', clientAppVersion: '26.1.97', clientSdkVersion: '10.3.7', httpEnvironment: 'prod', sdkInstallId: '' } },
-                                    dev: { os: { name: 'tizen', ver: '2.1.0', platform: 'desktop' }, hw: { make: 'Samsung', model: 'unknown', sdktype: 'web' }, browser: { browserName: 'chrome', browserVersion: '140.0.3485.54' }, displayInfo: { dimensions: { widthInPixels: 4096, heightInPixels: 2160 }, pixelDensity: { dpiX: 1, dpiY: 1 } } }
-                                });
-                                const headers = {};
-                                req.headers.forEach((v, k) => { headers[k] = v; });
-                                headers['x-ms-device-info'] = deviceInfo;
-                                return __nativeFetch(new Request(req.url, { method: 'POST', headers, body: JSON.stringify(body), credentials: req.credentials, mode: req.mode }));
+                    const method = (input instanceof Request ? input.method : (init && init.method) || 'GET').toUpperCase();
+                    if (url.includes('/sessions/cloud/play') && method === 'POST') {
+                        const original = input instanceof Request ? input : new Request(input, init);
+                        const clone = original.clone();
+                        return clone.json().then(body => {
+                            if (body.settings) body.settings.osName = 'tizen';
+                            const deviceInfo = JSON.stringify({
+                                appInfo: { env: { clientAppId: window.location.host, clientAppType: 'browser', clientAppVersion: '26.1.97', clientSdkVersion: '10.3.7', httpEnvironment: 'prod', sdkInstallId: '' } },
+                                dev: { os: { name: 'tizen', ver: '2.1.0', platform: 'desktop' }, hw: { make: 'Samsung', model: 'unknown', sdktype: 'web' }, browser: { browserName: 'chrome', browserVersion: '140.0.3485.54' }, displayInfo: { dimensions: { widthInPixels: 4096, heightInPixels: 2160 }, pixelDensity: { dpiX: 1, dpiY: 1 } } }
                             });
-                        } catch(e) {}
+                            const headers = {};
+                            original.headers.forEach((v, k) => { headers[k] = v; });
+                            headers['x-ms-device-info'] = deviceInfo;
+                            return __nativeFetch(new Request(original.url, { method: 'POST', headers, body: JSON.stringify(body), credentials: original.credentials, mode: original.mode }));
+                        }).catch(() => __nativeFetch(original, init));
                     }
                     return __nativeFetch.apply(this, arguments);
                 };
