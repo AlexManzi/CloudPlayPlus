@@ -120,12 +120,12 @@ class MainActivity : AppCompatActivity() {
         if (hasFocus) {
             @Suppress("DEPRECATION")
             window.decorView.systemUiVisibility = (
-                View.SYSTEM_UI_FLAG_FULLSCREEN
-                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                    or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-            )
+                    View.SYSTEM_UI_FLAG_FULLSCREEN
+                            or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                            or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                            or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    )
         }
     }
 
@@ -152,25 +152,25 @@ class MainActivity : AppCompatActivity() {
                 window.__gxcloudInjected = true;
 
                 const __nativeFetch = window.fetch;
+                const DEVICE_INFO = JSON.stringify({
+                    appInfo: { env: { clientAppId: window.location.host, clientAppType: 'browser', clientAppVersion: '26.1.97', clientSdkVersion: '10.3.7', httpEnvironment: 'prod', sdkInstallId: '' } },
+                    dev: { os: { name: 'tizen', ver: '2.1.0', platform: 'desktop' }, hw: { make: 'Samsung', model: 'unknown', sdktype: 'web' }, browser: { browserName: 'chrome', browserVersion: '140.0.3485.54' }, displayInfo: { dimensions: { widthInPixels: 4096, heightInPixels: 2160 }, pixelDensity: { dpiX: 1, dpiY: 1 } } }
+                });
                 window.fetch = function(input, init) {
-                    const url = (input instanceof Request ? input.url : String(input));
-                    const method = (input instanceof Request ? input.method : (init && init.method) || 'GET').toUpperCase();
-                    if (url.includes('/sessions/cloud/play') && method === 'POST') {
-                        const original = input instanceof Request ? input : new Request(input, init);
-                        const clone = original.clone();
-                        return clone.json().then(body => {
-                            if (body.settings) body.settings.osName = 'tizen';
-                            const deviceInfo = JSON.stringify({
-                                appInfo: { env: { clientAppId: window.location.host, clientAppType: 'browser', clientAppVersion: '26.1.97', clientSdkVersion: '10.3.7', httpEnvironment: 'prod', sdkInstallId: '' } },
-                                dev: { os: { name: 'tizen', ver: '2.1.0', platform: 'desktop' }, hw: { make: 'Samsung', model: 'unknown', sdktype: 'web' }, browser: { browserName: 'chrome', browserVersion: '140.0.3485.54' }, displayInfo: { dimensions: { widthInPixels: 4096, heightInPixels: 2160 }, pixelDensity: { dpiX: 1, dpiY: 1 } } }
-                            });
-                            const headers = {};
-                            original.headers.forEach((v, k) => { headers[k] = v; });
-                            headers['x-ms-device-info'] = deviceInfo;
-                            return __nativeFetch(new Request(original.url, { method: 'POST', headers, body: JSON.stringify(body), credentials: original.credentials, mode: original.mode }));
-                        }).catch(() => __nativeFetch(original, init));
+                    if (typeof input === 'string' && !input.includes('/sessions/cloud/play')) {
+                        return __nativeFetch(input, init);
                     }
-                    return __nativeFetch.apply(this, arguments);
+                    const original = input instanceof Request ? input : new Request(input, init);
+                    if (!original.url.includes('/sessions/cloud/play') || original.method !== 'POST') {
+                        return __nativeFetch(input, init);
+                    }
+                    const clone = original.clone();
+                    return clone.json().then(body => {
+                        if (body?.settings) body.settings.osName = 'tizen';
+                        const headers = new Headers(original.headers);
+                        headers.set('x-ms-device-info', DEVICE_INFO);
+                        return __nativeFetch(new Request(original, { headers, body: JSON.stringify(body) }));
+                    }).catch(() => __nativeFetch(original));
                 };
 
                 const quadVerts = new Float32Array([-1,-1,3,-1,-1,3]);
@@ -212,7 +212,7 @@ class MainActivity : AppCompatActivity() {
                     gl.disable(gl.DITHER);
 
                     const vert = '#version 300 es\nin vec4 position;\nvoid main(){gl_Position=position;}';
-                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 texelSize;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=vec2(gl_FragCoord.x*texelSize.x,1.0-gl_FragCoord.y*texelSize.y);\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+texelSize*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+texelSize*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+texelSize*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+texelSize*vec2(0,-1)).rgb;\n  vec3 mn3=min(min(min(d,e),min(f,b)),h);\n  vec3 mx3=max(max(max(d,e),max(f,b)),h);\n  float mn_l=dot(mn3,vec3(0.2126,0.7152,0.0722));\n  float mx_l=dot(mx3,vec3(0.2126,0.7152,0.0722));\n  float amp=sqrt(clamp(min(mn_l,2.0-mx_l)/(mx_l+0.01),0.0,1.0));\n  float luma=dot(e,vec3(0.2126,0.7152,0.0722));\n  float wm=smoothstep(0.05,0.5,luma);\n  float cg=smoothstep(0.02,0.08,mx_l-mn_l);\n  float w=-(wm*amp*cg/8.0);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 det=o-e;\n  vec3 lim=det/(1.0+abs(det)*4.0);\n  vec3 s=e+lim*sharpenFactor;\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  float satBoost=1.40;\n  fragColor=vec4(clamp(mix(l,s,satBoost),0.0,1.0),1.0);\n}';
+                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 texelSize;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=vec2(gl_FragCoord.x*texelSize.x,1.0-gl_FragCoord.y*texelSize.y);\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+texelSize*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+texelSize*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+texelSize*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+texelSize*vec2(0,-1)).rgb;\n  vec3 mn3=min(min(min(d,e),min(f,b)),h);\n  vec3 mx3=max(max(max(d,e),max(f,b)),h);\n  float mn_l=dot(mn3,vec3(0.2126,0.7152,0.0722));\n  float mx_l=dot(mx3,vec3(0.2126,0.7152,0.0722));\n  float amp=sqrt(clamp(min(mn_l,2.0-mx_l)/(mx_l+0.01),0.0,1.0));\n  float luma=dot(e,vec3(0.2126,0.7152,0.0722));\n  float wm=smoothstep(0.05,0.5,luma);\n  float cg=smoothstep(0.02,0.08,mx_l-mn_l);\n  float w=-(wm*amp*cg/8.0);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 det=o-e;\n  vec3 lim=det/(1.0+abs(det)*4.0);\n  vec3 s=e+lim*sharpenFactor;\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  float satBoost=mix(1.0,1.16,wm);\n  fragColor=vec4(clamp(mix(l,s,satBoost),0.0,1.0),1.0);\n}';
 
                     const mkShader = (type, src) => {
                         const s = gl.createShader(type);
