@@ -2,6 +2,9 @@ package com.example.gxcloud
 
 import android.annotation.SuppressLint
 import android.content.pm.ActivityInfo
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
@@ -19,6 +22,8 @@ import kotlin.math.abs
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
+    private lateinit var audioManager: AudioManager
+    private lateinit var audioFocusRequest: AudioFocusRequest
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -44,11 +49,20 @@ class MainActivity : AppCompatActivity() {
                 View.SYSTEM_UI_FLAG_FULLSCREEN
                         or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                         or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                        or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                        or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                 )
 
         setContentView(R.layout.activity_main)
+
+        audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+        audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_GAME)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build()
+            )
+            .setWillPauseWhenDucked(false)
+            .build()
 
         webView = findViewById(R.id.webview)
         WebView.setWebContentsDebuggingEnabled(false)
@@ -60,13 +74,14 @@ class MainActivity : AppCompatActivity() {
         webView.setBackgroundColor(android.graphics.Color.BLACK)
         window.decorView.setBackgroundColor(android.graphics.Color.BLACK)
         webView.setLayerType(View.LAYER_TYPE_NONE, null)
+        webView.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
+        webView.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
 
         // WebView settings
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
             mediaPlaybackRequiresUserGesture = false
-            userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0"
             safeBrowsingEnabled = false
             setGeolocationEnabled(false)
             allowContentAccess = false
@@ -89,8 +104,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
-
         setupBackHandler()
         webView.loadUrl("https://play.xbox.com/")
     }
@@ -99,12 +112,16 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         webView.resumeTimers()
         webView.onResume()
+        webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+        audioManager.requestAudioFocus(audioFocusRequest)
     }
 
     override fun onPause() {
         super.onPause()
         webView.onPause()
         webView.pauseTimers()
+        webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_WAIVED, true)
+        audioManager.abandonAudioFocusRequest(audioFocusRequest)
     }
 
     override fun onDestroy() {
@@ -123,13 +140,12 @@ class MainActivity : AppCompatActivity() {
                     View.SYSTEM_UI_FLAG_FULLSCREEN
                             or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                             or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                            or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                            or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                     )
         }
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
         return webView.dispatchKeyEvent(event) || super.dispatchKeyEvent(event)
     }
 
@@ -151,10 +167,27 @@ class MainActivity : AppCompatActivity() {
                 if (window.__gxcloudInjected) return;
                 window.__gxcloudInjected = true;
 
+                (function() {
+                    let lastY = 0;
+                    document.addEventListener('touchstart', (e) => {
+                        lastY = e.touches[0].clientY;
+                    }, { passive: true });
+                    document.addEventListener('touchmove', (e) => {
+                        if (document.querySelector('video')) return;
+                        const dy = lastY - e.touches[0].clientY;
+                        lastY = e.touches[0].clientY;
+                        e.target.dispatchEvent(new WheelEvent('wheel', {
+                            bubbles: true, cancelable: true,
+                            deltaY: dy * 3,
+                            deltaMode: WheelEvent.DOM_DELTA_PIXEL
+                        }));
+                    }, { passive: true });
+                })();
+
                 const __nativeFetch = window.fetch;
                 const DEVICE_INFO = JSON.stringify({
                     appInfo: { env: { clientAppId: window.location.host, clientAppType: 'browser', clientAppVersion: '26.1.97', clientSdkVersion: '10.3.7', httpEnvironment: 'prod', sdkInstallId: '' } },
-                    dev: { os: { name: 'tizen', ver: '2.1.0', platform: 'desktop' }, hw: { make: 'Samsung', model: 'unknown', sdktype: 'web' }, browser: { browserName: 'chrome', browserVersion: '140.0.3485.54' }, displayInfo: { dimensions: { widthInPixels: 4096, heightInPixels: 2160 }, pixelDensity: { dpiX: 1, dpiY: 1 } } }
+                    dev: { os: { name: 'windows', ver: '22631.2715', platform: 'desktop' }, hw: { make: 'Microsoft', model: 'unknown', sdktype: 'web' }, browser: { browserName: 'chrome', browserVersion: '140.0.3485.54' }, displayInfo: { dimensions: { widthInPixels: 1920, heightInPixels: 1080 }, pixelDensity: { dpiX: 1, dpiY: 1 } } }
                 });
                 window.fetch = function(input, init) {
                     if (typeof input === 'string' && !input.includes('/sessions/cloud/play')) {
@@ -166,7 +199,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     const clone = original.clone();
                     return clone.json().then(body => {
-                        if (body?.settings) body.settings.osName = 'tizen';
+                        if (body?.settings) body.settings.osName = 'windows';
                         const headers = new Headers(original.headers);
                         headers.set('x-ms-device-info', DEVICE_INFO);
                         return __nativeFetch(new Request(original, { headers, body: JSON.stringify(body) }));
@@ -209,10 +242,8 @@ class MainActivity : AppCompatActivity() {
                         return;
                     }
 
-                    gl.disable(gl.DITHER);
-
                     const vert = '#version 300 es\nin vec4 position;\nvoid main(){gl_Position=position;}';
-                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 texelSize;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=vec2(gl_FragCoord.x*texelSize.x,1.0-gl_FragCoord.y*texelSize.y);\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+texelSize*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+texelSize*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+texelSize*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+texelSize*vec2(0,-1)).rgb;\n  vec3 mn3=min(min(min(d,e),min(f,b)),h);\n  vec3 mx3=max(max(max(d,e),max(f,b)),h);\n  float mn_l=dot(mn3,vec3(0.2126,0.7152,0.0722));\n  float mx_l=dot(mx3,vec3(0.2126,0.7152,0.0722));\n  float amp=sqrt(clamp(min(mn_l,2.0-mx_l)/(mx_l+0.01),0.0,1.0));\n  float luma=dot(e,vec3(0.2126,0.7152,0.0722));\n  float wm=smoothstep(0.05,0.5,luma);\n  float cg=smoothstep(0.02,0.08,mx_l-mn_l);\n  float w=-(wm*amp*cg/8.0);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 det=o-e;\n  vec3 lim=det/(1.0+abs(det)*4.0);\n  vec3 s=e+lim*sharpenFactor;\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  float satBoost=mix(1.0,1.16,wm);\n  fragColor=vec4(clamp(mix(l,s,satBoost),0.0,1.0),1.0);\n}';
+                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 texelSize;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=vec2(gl_FragCoord.x*texelSize.x,1.0-gl_FragCoord.y*texelSize.y);\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+texelSize*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+texelSize*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+texelSize*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+texelSize*vec2(0,-1)).rgb;\n  vec3 mn3=min(min(min(d,e),min(f,b)),h);\n  vec3 mx3=max(max(max(d,e),max(f,b)),h);\n  float mn_l=dot(mn3,vec3(0.2126,0.7152,0.0722));\n  float mx_l=dot(mx3,vec3(0.2126,0.7152,0.0722));\n  float amp=sqrt(clamp(min(mn_l,2.0-mx_l)/(mx_l+0.01),0.0,1.0));\n  float luma=dot(e,vec3(0.2126,0.7152,0.0722));\n  float wm=smoothstep(0.05,0.5,luma);\n  float cg=smoothstep(0.005,0.04,mx_l-mn_l);\n  float w=-(wm*amp*cg/8.0);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 det=o-e;\n  vec3 lim=det/(1.0+abs(det)*4.0);\n  vec3 s=e+lim*sharpenFactor;\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  float satBoost=mix(1.0,1.16,wm);\n  fragColor=vec4(clamp(mix(l,s,satBoost),0.0,1.0),1.0);\n}';
 
                     const mkShader = (type, src) => {
                         const s = gl.createShader(type);
@@ -269,26 +300,28 @@ class MainActivity : AppCompatActivity() {
                     gl.uniform1f(gl.getUniformLocation(prog, 'sharpenFactor'), 0.35);
 
                     const bridge = document.createElement('canvas');
-                    const bridgeCtx = bridge.getContext('2d', { alpha: false, desynchronized: true, willReadFrequently: false });
+                    const bridgeCtx = bridge.getContext('2d', { alpha: false, willReadFrequently: false });
+                    bridgeCtx.imageSmoothingEnabled = false;
 
                     let syncTimer = null;
                     const syncSize = () => { clearTimeout(syncTimer); syncTimer = setTimeout(_syncSize, 200); };
                     const _syncSize = () => {
+                        if (!video.videoWidth || !video.videoHeight) return;
+                        const w = video.videoWidth;
+                        const h = video.videoHeight;
                         const r = video.getBoundingClientRect();
-                        const w = Math.round(video.videoWidth || Math.round(r.width));
-                        const h = Math.round(video.videoHeight || Math.round(r.height));
-                        if (canvas.width === w && canvas.height === h) return;
-                        canvas.width = bridge.width = w;
-                        canvas.height = bridge.height = h;
                         const vz = parseInt(window.getComputedStyle(video).zIndex) || 0;
                         const cz = isNaN(vz) ? 1 : vz + 1;
                         canvas.style.cssText = 'position:fixed;z-index:' + cz + ';top:' + Math.round(r.top) + 'px;left:' + Math.round(r.left) + 'px;width:' + Math.round(r.width) + 'px;height:' + Math.round(r.height) + 'px;pointer-events:none;';
+                        if (canvas.width === w && canvas.height === h) return;
+                        canvas.width = bridge.width = w;
+                        canvas.height = bridge.height = h;
                         gl.viewport(0, 0, w, h);
                         gl.uniform2f(texelSizeLoc, 1.0/w, 1.0/h);
                     };
                     _syncSize();
 
-                    video.addEventListener('loadedmetadata', syncSize);
+                    video.addEventListener('loadedmetadata', _syncSize);
                     video.addEventListener('resize', syncSize);
 
                     const ro = new ResizeObserver(syncSize);
@@ -296,24 +329,11 @@ class MainActivity : AppCompatActivity() {
 
                     const useRVFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
                     let frameHandle = null;
-                    let lastTop = -1;
-                    let lastLeft = -1;
 
                     const render = () => {
                         if (video.readyState >= 2 && !video.paused && !document.hidden) {
-                            const r = video.getBoundingClientRect();
-                            const top = Math.round(r.top);
-                            const left = Math.round(r.left);
-                            if (top !== lastTop || left !== lastLeft) {
-                                lastTop = top;
-                                lastLeft = left;
-                                canvas.style.top = top + 'px';
-                                canvas.style.left = left + 'px';
-                                canvas.style.width = Math.round(r.width) + 'px';
-                                canvas.style.height = Math.round(r.height) + 'px';
-                            }
                             bridgeCtx.drawImage(video, 0, 0, bridge.width, bridge.height);
-                            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, bridge);
+                            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bridge);
                             gl.drawArrays(gl.TRIANGLES, 0, 3);
                         }
                         frameHandle = useRVFC
@@ -329,8 +349,13 @@ class MainActivity : AppCompatActivity() {
                         if (useRVFC) video.cancelVideoFrameCallback(frameHandle);
                         else cancelAnimationFrame(frameHandle);
                         frameHandle = null;
+                        ro.disconnect();
+                        clearTimeout(syncTimer);
+                        video.removeEventListener('loadedmetadata', _syncSize);
+                        video.removeEventListener('resize', syncSize);
                         canvas.remove();
                         delete video.dataset.casSetup;
+                        delete video._casCleanup;
                     }, false);
                     canvas.addEventListener('webglcontextrestored', () => {
                         setupWebGLCAS(video);
@@ -340,7 +365,7 @@ class MainActivity : AppCompatActivity() {
                         if (useRVFC) video.cancelVideoFrameCallback(frameHandle);
                         else cancelAnimationFrame(frameHandle);
                         clearTimeout(syncTimer);
-                        video.removeEventListener('loadedmetadata', syncSize);
+                        video.removeEventListener('loadedmetadata', _syncSize);
                         video.removeEventListener('resize', syncSize);
                         ro.disconnect();
                         canvas.remove();
