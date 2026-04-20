@@ -58,7 +58,8 @@ class MainActivity : AppCompatActivity() {
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_GAME)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                    .setFlags(AudioAttributes.FLAG_LOW_LATENCY)
                     .build()
             )
             .setWillPauseWhenDucked(false)
@@ -88,7 +89,6 @@ class MainActivity : AppCompatActivity() {
             setSupportZoom(false)
             builtInZoomControls = false
             textZoom = 100
-            databaseEnabled = false
             allowFileAccess = false
         }
 
@@ -100,7 +100,7 @@ class MainActivity : AppCompatActivity() {
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
-                view.evaluateJavascript(INJECT_SCRIPT, null)
+                if (url == view.url) view.evaluateJavascript(INJECT_SCRIPT, null)
             }
         }
 
@@ -235,15 +235,15 @@ class MainActivity : AppCompatActivity() {
                     video.parentNode.insertBefore(canvas, video);
                     video.style.visibility = 'hidden';
 
-                    const gl = canvas.getContext('webgl2', { powerPreference: 'low-power', alpha: false, depth: false, stencil: false, preserveDrawingBuffer: false, antialias: false, desynchronized: true });
+                    const gl = canvas.getContext('webgl2', { powerPreference: 'low-power', alpha: false, depth: false, stencil: false, preserveDrawingBuffer: false, antialias: false, desynchronized: true, failIfMajorPerformanceCaveat: true });
                     if (!gl) {
                         canvas.remove();
                         video.style.visibility = '';
                         return;
                     }
 
-                    const vert = '#version 300 es\nin vec4 position;\nvoid main(){gl_Position=position;}';
-                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 texelSize;\nuniform float sharpenFactor;\nout vec4 fragColor;\nvoid main(){\n  vec2 uv=vec2(gl_FragCoord.x*texelSize.x,1.0-gl_FragCoord.y*texelSize.y);\n  vec3 e=texture(data,uv).rgb;\n  vec3 b=texture(data,uv+texelSize*vec2(0,1)).rgb;\n  vec3 d=texture(data,uv+texelSize*vec2(-1,0)).rgb;\n  vec3 f=texture(data,uv+texelSize*vec2(1,0)).rgb;\n  vec3 h=texture(data,uv+texelSize*vec2(0,-1)).rgb;\n  vec3 mn3=min(min(min(d,e),min(f,b)),h);\n  vec3 mx3=max(max(max(d,e),max(f,b)),h);\n  float mn_l=dot(mn3,vec3(0.2126,0.7152,0.0722));\n  float mx_l=dot(mx3,vec3(0.2126,0.7152,0.0722));\n  float amp=sqrt(clamp(min(mn_l,2.0-mx_l)/(mx_l+0.01),0.0,1.0));\n  float luma=dot(e,vec3(0.2126,0.7152,0.0722));\n  float wm=smoothstep(0.05,0.5,luma);\n  float cg=smoothstep(0.005,0.04,mx_l-mn_l);\n  float w=-(wm*amp*cg/8.0);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 det=o-e;\n  vec3 lim=det/(1.0+abs(det)*4.0);\n  vec3 s=e+lim*sharpenFactor;\n  vec3 l=vec3(dot(s,vec3(0.2126,0.7152,0.0722)));\n  float satBoost=mix(1.0,1.16,wm);\n  fragColor=vec4(clamp(mix(l,s,satBoost),0.0,1.0),1.0);\n}';
+                    const vert = '#version 300 es\nin vec4 position;\nout vec2 vUV;\nvoid main(){gl_Position=position;vUV=vec2(position.x*0.5+0.5,0.5-position.y*0.5);}';
+                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 texelSize;\nuniform float sharpenFactor;\nin vec2 vUV;\nout vec4 fragColor;\nvoid main(){\n  vec3 e=texture(data,vUV).rgb;\n  vec3 b=texture(data,vUV+texelSize*vec2(0,1)).rgb;\n  vec3 d=texture(data,vUV+texelSize*vec2(-1,0)).rgb;\n  vec3 f=texture(data,vUV+texelSize*vec2(1,0)).rgb;\n  vec3 h=texture(data,vUV+texelSize*vec2(0,-1)).rgb;\n  vec3 lw=vec3(0.2126,0.7152,0.0722);\n  float le=dot(e,lw);float lb=dot(b,lw);float ld=dot(d,lw);float lf=dot(f,lw);float lh=dot(h,lw);\n  float mn_l=min(min(min(ld,le),min(lf,lb)),lh);\n  float mx_l=max(max(max(ld,le),max(lf,lb)),lh);\n  float amp=sqrt(clamp(min(mn_l,2.0-mx_l)/(mx_l+0.01),0.0,1.0));\n  float wm=smoothstep(0.05,0.5,le);\n  float cg=smoothstep(0.005,0.04,mx_l-mn_l);\n  float w=-(wm*amp*cg/8.0);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 det=o-e;\n  vec3 lim=det/(1.0+abs(det)*4.0);\n  vec3 s=e+lim*sharpenFactor;\n  float satBoost=mix(1.0,1.16,wm);\n  fragColor=vec4(clamp(mix(vec3(dot(s,lw)),s,satBoost),0.0,1.0),1.0);\n}';
 
                     const mkShader = (type, src) => {
                         const s = gl.createShader(type);
@@ -330,25 +330,42 @@ class MainActivity : AppCompatActivity() {
                     const useRVFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
                     let frameHandle = null;
 
+                    const scheduleFrame = () => {
+                        if (frameHandle !== null || video.paused || document.hidden) return;
+                        frameHandle = useRVFC
+                            ? video.requestVideoFrameCallback(render)
+                            : requestAnimationFrame(render);
+                    };
+
+                    const cancelFrame = () => {
+                        if (frameHandle === null) return;
+                        if (useRVFC) video.cancelVideoFrameCallback(frameHandle);
+                        else cancelAnimationFrame(frameHandle);
+                        frameHandle = null;
+                    };
+
                     const render = () => {
+                        frameHandle = null;
                         if (video.readyState >= 2 && !video.paused && !document.hidden) {
                             bridgeCtx.drawImage(video, 0, 0, bridge.width, bridge.height);
                             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bridge);
                             gl.drawArrays(gl.TRIANGLES, 0, 3);
                         }
-                        frameHandle = useRVFC
-                            ? video.requestVideoFrameCallback(render)
-                            : requestAnimationFrame(render);
+                        scheduleFrame();
                     };
-                    frameHandle = useRVFC
-                        ? video.requestVideoFrameCallback(render)
-                        : requestAnimationFrame(render);
+
+                    const onVisibility = () => { if (document.hidden) cancelFrame(); else scheduleFrame(); };
+                    video.addEventListener('pause', cancelFrame);
+                    video.addEventListener('play', scheduleFrame);
+                    document.addEventListener('visibilitychange', onVisibility);
+                    scheduleFrame();
 
                     canvas.addEventListener('webglcontextlost', (e) => {
                         e.preventDefault();
-                        if (useRVFC) video.cancelVideoFrameCallback(frameHandle);
-                        else cancelAnimationFrame(frameHandle);
-                        frameHandle = null;
+                        cancelFrame();
+                        video.removeEventListener('pause', cancelFrame);
+                        video.removeEventListener('play', scheduleFrame);
+                        document.removeEventListener('visibilitychange', onVisibility);
                         ro.disconnect();
                         clearTimeout(syncTimer);
                         video.removeEventListener('loadedmetadata', _syncSize);
@@ -362,8 +379,10 @@ class MainActivity : AppCompatActivity() {
                     }, false);
 
                     video._casCleanup = () => {
-                        if (useRVFC) video.cancelVideoFrameCallback(frameHandle);
-                        else cancelAnimationFrame(frameHandle);
+                        cancelFrame();
+                        video.removeEventListener('pause', cancelFrame);
+                        video.removeEventListener('play', scheduleFrame);
+                        document.removeEventListener('visibilitychange', onVisibility);
                         clearTimeout(syncTimer);
                         video.removeEventListener('loadedmetadata', _syncSize);
                         video.removeEventListener('resize', syncSize);
@@ -400,7 +419,7 @@ class MainActivity : AppCompatActivity() {
                             const poll = setInterval(() => {
                                 const toggle = document.querySelector('button[aria-label="Quick Actions Toggle"]');
                                 if (toggle) { clearInterval(poll); hideMenuButton(); }
-                            }, 2000);
+                            }, 3000);
                         }
                     }, 10000);
                     setupWebGLCAS(video);
