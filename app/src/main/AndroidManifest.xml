@@ -14,7 +14,7 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.GxCloud"
         android:hardwareAccelerated="true"
-        android:largeHeap="true">
+        >
         <activity
             android:name=".MainActivity"
             android:exported="true"
