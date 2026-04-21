@@ -83,6 +83,7 @@ class MainActivity : AppCompatActivity() {
             javaScriptEnabled = true
             domStorageEnabled = true
             mediaPlaybackRequiresUserGesture = false
+            userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0"
             safeBrowsingEnabled = false
             setGeolocationEnabled(false)
             allowContentAccess = false
@@ -166,45 +167,6 @@ class MainActivity : AppCompatActivity() {
             (function() {
                 if (window.__gxcloudInjected) return;
                 window.__gxcloudInjected = true;
-
-                (function() {
-                    let lastY = 0;
-                    document.addEventListener('touchstart', (e) => {
-                        lastY = e.touches[0].clientY;
-                    }, { passive: true });
-                    document.addEventListener('touchmove', (e) => {
-                        if (document.querySelector('video')) return;
-                        const dy = lastY - e.touches[0].clientY;
-                        lastY = e.touches[0].clientY;
-                        e.target.dispatchEvent(new WheelEvent('wheel', {
-                            bubbles: true, cancelable: true,
-                            deltaY: dy * 3,
-                            deltaMode: WheelEvent.DOM_DELTA_PIXEL
-                        }));
-                    }, { passive: true });
-                })();
-
-                const __nativeFetch = window.fetch;
-                const DEVICE_INFO = JSON.stringify({
-                    appInfo: { env: { clientAppId: window.location.host, clientAppType: 'browser', clientAppVersion: '26.1.97', clientSdkVersion: '10.3.7', httpEnvironment: 'prod', sdkInstallId: '' } },
-                    dev: { os: { name: 'windows', ver: '22631.2715', platform: 'desktop' }, hw: { make: 'Microsoft', model: 'unknown', sdktype: 'web' }, browser: { browserName: 'chrome', browserVersion: '140.0.3485.54' }, displayInfo: { dimensions: { widthInPixels: 1920, heightInPixels: 1080 }, pixelDensity: { dpiX: 1, dpiY: 1 } } }
-                });
-                window.fetch = function(input, init) {
-                    if (typeof input === 'string' && !input.includes('/sessions/cloud/play')) {
-                        return __nativeFetch(input, init);
-                    }
-                    const original = input instanceof Request ? input : new Request(input, init);
-                    if (!original.url.includes('/sessions/cloud/play') || original.method !== 'POST') {
-                        return __nativeFetch(input, init);
-                    }
-                    const clone = original.clone();
-                    return clone.json().then(body => {
-                        if (body?.settings) body.settings.osName = 'windows';
-                        const headers = new Headers(original.headers);
-                        headers.set('x-ms-device-info', DEVICE_INFO);
-                        return __nativeFetch(new Request(original, { headers, body: JSON.stringify(body) }));
-                    }).catch(() => __nativeFetch(original));
-                };
 
                 const quadVerts = new Float32Array([-1,-1,3,-1,-1,3]);
 
