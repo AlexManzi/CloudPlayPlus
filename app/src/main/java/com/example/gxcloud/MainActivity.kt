@@ -12,9 +12,11 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Toast
 import androidx.activity.addCallback
 import androidx.appcompat.app.AppCompatActivity
 import kotlin.math.abs
@@ -24,6 +26,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private lateinit var audioManager: AudioManager
     private lateinit var audioFocusRequest: AudioFocusRequest
+
+    private var isBluetoothMode = false
+    private var isStreamActive = false
+    private var tapCount = 0
+    private var firstTapTime = 0L
+    private var startupDeviceIds: Set<Int> = emptySet()
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -100,10 +108,23 @@ class MainActivity : AppCompatActivity() {
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
-                if (url == view.url) view.evaluateJavascript(INJECT_SCRIPT, null)
+                if (url != view.url) return
+                val script = if (isBluetoothMode) {
+                    val namesJson = builtInDeviceNames()
+                    "window.__btMode=true;" + INJECT_SCRIPT + ";window.__gxFilter?.activate($namesJson);"
+                } else {
+                    INJECT_SCRIPT
+                }
+                view.evaluateJavascript(script, null)
             }
         }
 
+        startupDeviceIds = android.view.InputDevice.getDeviceIds().toList()
+            .mapNotNull { android.view.InputDevice.getDevice(it) }
+            .filter { (it.sources and android.view.InputDevice.SOURCE_GAMEPAD) != 0 || (it.sources and android.view.InputDevice.SOURCE_JOYSTICK) != 0 }
+            .map { it.id }.toSet()
+
+        webView.addJavascriptInterface(StreamBridge(), "StreamBridge")
         setupBackHandler()
         webView.loadUrl("https://play.xbox.com/")
     }
@@ -144,13 +165,47 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if (!isStreamActive && event.action == MotionEvent.ACTION_DOWN) {
+            val now = System.currentTimeMillis()
+            if (tapCount == 0 || now - firstTapTime > 1500) {
+                tapCount = 1
+                firstTapTime = now
+            } else {
+                tapCount++
+                if (tapCount >= 5) {
+                    tapCount = 0
+                    isBluetoothMode = !isBluetoothMode
+                    if (isBluetoothMode) {
+                        val namesJson = builtInDeviceNames()
+                        webView.evaluateJavascript("window.__btMode=true;window.__gxFilter?.activate($namesJson);", null)
+                    } else {
+                        webView.evaluateJavascript("window.__btMode=false;window.__gxFilter?.deactivate();", null)
+                    }
+                    val msg = if (isBluetoothMode) "Bluetooth controller: ON" else "Built-in controller: restored"
+                    Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        return super.dispatchTouchEvent(event)
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.keyCode == KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
+        if (isBluetoothMode && event.deviceId in startupDeviceIds) return true
         return webView.dispatchKeyEvent(event) || super.dispatchKeyEvent(event)
     }
 
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        if (isBluetoothMode && event.deviceId in startupDeviceIds) return true
         return webView.dispatchGenericMotionEvent(event) || super.dispatchGenericMotionEvent(event)
+    }
+
+    private fun builtInDeviceNames(): String {
+        val names = startupDeviceIds
+            .mapNotNull { android.view.InputDevice.getDevice(it)?.name }
+            .map { "\"${it.replace("\\", "\\\\").replace("\"", "\\\"")}\"" }
+        return "[${names.joinToString(",")}]"
     }
 
     private fun setupBackHandler() {
@@ -161,11 +216,55 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    inner class StreamBridge {
+        @JavascriptInterface
+        fun setStreamActive(active: Boolean) {
+            isStreamActive = active
+        }
+    }
+
     companion object {
         private val INJECT_SCRIPT = """
             (function() {
                 if (window.__gxcloudInjected) return;
                 window.__gxcloudInjected = true;
+
+                const _st = window.setTimeout;
+                window.setTimeout = function(fn, delay) {
+                    if (typeof fn === 'function' && typeof delay === 'number' && delay >= 0 && delay <= 8) {
+                        return _st(fn, 0);
+                    }
+                    return _st.apply(this, arguments);
+                };
+
+                const _getGamepads = navigator.getGamepads.bind(navigator);
+                let _builtInIndices = new Set();
+                navigator.getGamepads = function() {
+                    const pads = _getGamepads();
+                    if (!window.__btMode || _builtInIndices.size === 0) return pads;
+                    return Array.from(pads).map(p => (p && _builtInIndices.has(p.index)) ? null : p);
+                };
+                window.__gxFilter = {
+                    activate: function(builtInNames) {
+                        const pads = _getGamepads();
+                        _builtInIndices = new Set();
+                        for (const p of pads) {
+                            if (p?.connected && builtInNames.some(n => p.id.includes(n))) {
+                                _builtInIndices.add(p.index);
+                                window.dispatchEvent(new GamepadEvent('gamepaddisconnected', {gamepad: p}));
+                            }
+                        }
+                    },
+                    deactivate: function() {
+                        const prev = _builtInIndices;
+                        _builtInIndices = new Set();
+                        const pads = _getGamepads();
+                        for (const p of pads) {
+                            if (p?.connected && prev.has(p.index))
+                                window.dispatchEvent(new GamepadEvent('gamepadconnected', {gamepad: p}));
+                        }
+                    }
+                };
 
                 (function() {
                     let lastY = 0;
@@ -397,6 +496,7 @@ class MainActivity : AppCompatActivity() {
                 };
 
                 const foundVideo = (video) => {
+                    if (window.StreamBridge) window.StreamBridge.setStreamActive(true);
                     let menuFound = false;
                     const menuObserver = new MutationObserver((mutations) => {
                         if (!mutations.some(m => m.addedNodes.length > 0)) return;
@@ -438,6 +538,7 @@ class MainActivity : AppCompatActivity() {
                             removalObserver.disconnect();
                             menuObserver.disconnect();
                             if (video._casCleanup) video._casCleanup();
+                            if (window.StreamBridge) window.StreamBridge.setStreamActive(false);
                             startWatching();
                         }
                     });
