@@ -7,7 +7,6 @@ import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
-import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
@@ -190,17 +189,6 @@ class MainActivity : AppCompatActivity() {
         return super.dispatchTouchEvent(event)
     }
 
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (event.keyCode == KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
-        if (isBluetoothMode && event.deviceId in startupDeviceIds) return true
-        return webView.dispatchKeyEvent(event) || super.dispatchKeyEvent(event)
-    }
-
-    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
-        if (isBluetoothMode && event.deviceId in startupDeviceIds) return true
-        return webView.dispatchGenericMotionEvent(event) || super.dispatchGenericMotionEvent(event)
-    }
-
     private fun builtInDeviceNames(): String {
         val names = startupDeviceIds
             .mapNotNull { android.view.InputDevice.getDevice(it)?.name }
@@ -229,61 +217,63 @@ class MainActivity : AppCompatActivity() {
                 if (window.__gxcloudInjected) return;
                 window.__gxcloudInjected = true;
 
-                const _st = window.setTimeout;
-                window.setTimeout = function(fn, delay) {
-                    if (typeof fn === 'function' && typeof delay === 'number' && delay >= 0 && delay <= 8) {
-                        return _st(fn, 0);
+const _getGamepads = navigator.getGamepads.bind(navigator);
+                let _builtInIndices = new Set();
+
+
+                const _wrapped = new Map();
+
+                const _wrapGamepad = (p, btPad) => {
+                    if (!_wrapped.has(p.index)) {
+                        _wrapped.set(p.index, {
+                            index: p.index, id: p.id, connected: true,
+                            mapping: p.mapping, timestamp: 0,
+                            axes: new Array(p.axes.length),
+                            buttons: new Array(p.buttons.length)
+                        });
                     }
-                    return _st.apply(this, arguments);
+                    const w = _wrapped.get(p.index);
+                    for (let i = 0; i < btPad.axes.length; i++) w.axes[i] = btPad.axes[i];
+                    for (let i = 0; i < btPad.buttons.length; i++) {
+                        const b = btPad.buttons[i];
+                        if (!w.buttons[i]) w.buttons[i] = { pressed: false, touched: false, value: 0 };
+                        w.buttons[i].pressed = b.pressed;
+                        w.buttons[i].touched = b.touched;
+                        w.buttons[i].value = b.value;
+                    }
+                    w.timestamp = btPad.timestamp;
+                    return w;
                 };
 
-                const _getGamepads = navigator.getGamepads.bind(navigator);
-                let _builtInIndices = new Set();
                 navigator.getGamepads = function() {
                     const pads = _getGamepads();
                     if (!window.__btMode || _builtInIndices.size === 0) return pads;
-                    return Array.from(pads).map(p => (p && _builtInIndices.has(p.index)) ? null : p);
+                    const arr = Array.from(pads);
+                    const btPad = arr.find(p => p?.connected && !_builtInIndices.has(p.index));
+                    if (!btPad) return pads;
+                    return arr.map(p => {
+                        if (!p) return null;
+                        if (_builtInIndices.has(p.index)) return _wrapGamepad(p, btPad);
+                        return p;
+                    });
                 };
+
+
                 window.__gxFilter = {
                     activate: function(builtInNames) {
                         const pads = _getGamepads();
                         _builtInIndices = new Set();
                         for (const p of pads) {
-                            if (p?.connected && builtInNames.some(n => p.id.includes(n))) {
+                            if (p?.connected && builtInNames.some(n => p.id.includes(n)))
                                 _builtInIndices.add(p.index);
-                                window.dispatchEvent(new GamepadEvent('gamepaddisconnected', {gamepad: p}));
-                            }
                         }
                     },
                     deactivate: function() {
-                        const prev = _builtInIndices;
                         _builtInIndices = new Set();
-                        const pads = _getGamepads();
-                        for (const p of pads) {
-                            if (p?.connected && prev.has(p.index))
-                                window.dispatchEvent(new GamepadEvent('gamepadconnected', {gamepad: p}));
-                        }
                     }
                 };
 
-                (function() {
-                    let lastY = 0;
-                    document.addEventListener('touchstart', (e) => {
-                        lastY = e.touches[0].clientY;
-                    }, { passive: true });
-                    document.addEventListener('touchmove', (e) => {
-                        if (document.querySelector('video')) return;
-                        const dy = lastY - e.touches[0].clientY;
-                        lastY = e.touches[0].clientY;
-                        e.target.dispatchEvent(new WheelEvent('wheel', {
-                            bubbles: true, cancelable: true,
-                            deltaY: dy * 3,
-                            deltaMode: WheelEvent.DOM_DELTA_PIXEL
-                        }));
-                    }, { passive: true });
-                })();
-
-                const __nativeFetch = window.fetch;
+const __nativeFetch = window.fetch;
                 const DEVICE_INFO = JSON.stringify({
                     appInfo: { env: { clientAppId: window.location.host, clientAppType: 'browser', clientAppVersion: '26.1.97', clientSdkVersion: '10.3.7', httpEnvironment: 'prod', sdkInstallId: '' } },
                     dev: { os: { name: 'windows', ver: '22631.2715', platform: 'desktop' }, hw: { make: 'Microsoft', model: 'unknown', sdktype: 'web' }, browser: { browserName: 'chrome', browserVersion: '140.0.3485.54' }, displayInfo: { dimensions: { widthInPixels: 1920, heightInPixels: 1080 }, pixelDensity: { dpiX: 1, dpiY: 1 } } }
