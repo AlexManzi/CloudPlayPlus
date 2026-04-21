@@ -17,6 +17,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.addCallback
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AppCompatDelegate
 import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
@@ -27,6 +28,7 @@ class MainActivity : AppCompatActivity() {
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
+        AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
         super.onCreate(savedInstanceState)
 
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
@@ -39,7 +41,9 @@ class MainActivity : AppCompatActivity() {
             val mode = display?.supportedModes
                 ?.minByOrNull { abs(it.refreshRate - 60f) }
             mode?.let {
-                window.attributes.preferredDisplayModeId = it.modeId
+                val lp = window.attributes
+                lp.preferredDisplayModeId = it.modeId
+                window.attributes = lp
             }
         }
 
@@ -197,7 +201,7 @@ class MainActivity : AppCompatActivity() {
                     video.parentNode.insertBefore(canvas, video);
                     video.style.visibility = 'hidden';
 
-                    const gl = canvas.getContext('webgl2', { powerPreference: 'low-power', alpha: false, depth: false, stencil: false, preserveDrawingBuffer: false, antialias: false, desynchronized: true, failIfMajorPerformanceCaveat: true });
+                    const gl = canvas.getContext('webgl2', { powerPreference: 'low-power', alpha: false, depth: false, stencil: false, preserveDrawingBuffer: false, antialias: false, desynchronized: true, premultipliedAlpha: false, failIfMajorPerformanceCaveat: true });
                     if (!gl) {
                         canvas.remove();
                         video.style.visibility = '';
@@ -291,6 +295,7 @@ class MainActivity : AppCompatActivity() {
 
                     const useRVFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
                     let frameHandle = null;
+                    let lastT = -1;
 
                     const scheduleFrame = () => {
                         if (frameHandle !== null || video.paused || document.hidden) return;
@@ -309,9 +314,13 @@ class MainActivity : AppCompatActivity() {
                     const render = () => {
                         frameHandle = null;
                         if (video.readyState >= 2 && !video.paused && !document.hidden) {
-                            bridgeCtx.drawImage(video, 0, 0, bridge.width, bridge.height);
-                            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bridge);
-                            gl.drawArrays(gl.TRIANGLES, 0, 3);
+                            const t = video.currentTime;
+                            if (t !== lastT) {
+                                lastT = t;
+                                bridgeCtx.drawImage(video, 0, 0, bridge.width, bridge.height);
+                                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, bridge);
+                                gl.drawArrays(gl.TRIANGLES, 0, 3);
+                            }
                         }
                         scheduleFrame();
                     };
