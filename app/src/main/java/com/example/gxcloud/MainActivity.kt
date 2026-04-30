@@ -1,7 +1,6 @@
 package com.example.gxcloud
 
 import android.annotation.SuppressLint
-import android.content.pm.ActivityInfo
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
@@ -30,8 +29,6 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
         super.onCreate(savedInstanceState)
-
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
 
         // Keep screen on while gaming
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -63,24 +60,23 @@ class MainActivity : AppCompatActivity() {
                 AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_GAME)
                     .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
-                    .setFlags(AudioAttributes.FLAG_LOW_LATENCY)
                     .build()
             )
             .setWillPauseWhenDucked(false)
             .build()
 
         webView = findViewById(R.id.webview)
-        WebView.setWebContentsDebuggingEnabled(false)
 
         webView.overScrollMode = View.OVER_SCROLL_NEVER
         webView.isVerticalScrollBarEnabled = false
+        webView.isHorizontalScrollBarEnabled = false
         webView.isFocusableInTouchMode = true
         webView.requestFocus()
         webView.setBackgroundColor(android.graphics.Color.BLACK)
-        window.decorView.setBackgroundColor(android.graphics.Color.BLACK)
+        window.setBackgroundDrawable(null)
         webView.setLayerType(View.LAYER_TYPE_NONE, null)
-        webView.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
-        webView.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        webView.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
+        webView.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
 
         // WebView settings
         webView.settings.apply {
@@ -172,6 +168,9 @@ class MainActivity : AppCompatActivity() {
                 if (window.__gxcloudInjected) return;
                 window.__gxcloudInjected = true;
 
+                document.documentElement.style.overscrollBehavior = 'none';
+                document.body.style.overscrollBehavior = 'none';
+
                 const quadVerts = new Float32Array([-1,-1,3,-1,-1,3]);
 
                 const style = document.createElement('style');
@@ -201,7 +200,7 @@ class MainActivity : AppCompatActivity() {
                     video.parentNode.insertBefore(canvas, video);
                     video.style.visibility = 'hidden';
 
-                    const gl = canvas.getContext('webgl2', { powerPreference: 'low-power', alpha: false, depth: false, stencil: false, preserveDrawingBuffer: false, antialias: false, desynchronized: true, premultipliedAlpha: false, failIfMajorPerformanceCaveat: true });
+                    const gl = canvas.getContext('webgl2', { powerPreference: 'low-power', alpha: false, depth: false, stencil: false, preserveDrawingBuffer: false, antialias: false, desynchronized: true, premultipliedAlpha: false });
                     if (!gl) {
                         canvas.remove();
                         video.style.visibility = '';
@@ -209,7 +208,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     const vert = '#version 300 es\nin vec4 position;\nout vec2 vUV;\nvoid main(){gl_Position=position;vUV=vec2(position.x*0.5+0.5,0.5-position.y*0.5);}';
-                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 texelSize;\nuniform float sharpenFactor;\nin vec2 vUV;\nout vec4 fragColor;\nvoid main(){\n  vec3 e=texture(data,vUV).rgb;\n  vec3 b=texture(data,vUV+texelSize*vec2(0,1)).rgb;\n  vec3 d=texture(data,vUV+texelSize*vec2(-1,0)).rgb;\n  vec3 f=texture(data,vUV+texelSize*vec2(1,0)).rgb;\n  vec3 h=texture(data,vUV+texelSize*vec2(0,-1)).rgb;\n  vec3 lw=vec3(0.2126,0.7152,0.0722);\n  float le=dot(e,lw);float lb=dot(b,lw);float ld=dot(d,lw);float lf=dot(f,lw);float lh=dot(h,lw);\n  float mn_l=min(min(min(ld,le),min(lf,lb)),lh);\n  float mx_l=max(max(max(ld,le),max(lf,lb)),lh);\n  float amp=sqrt(clamp(min(mn_l,2.0-mx_l)/(mx_l+0.01),0.0,1.0));\n  float wm=smoothstep(0.05,0.5,le);\n  float cg=smoothstep(0.005,0.04,mx_l-mn_l);\n  float w=-(wm*amp*cg/8.0);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 det=o-e;\n  vec3 lim=det/(1.0+abs(det)*4.0);\n  vec3 s=e+lim*sharpenFactor;\n  float satBoost=mix(1.0,1.16,wm);\n  fragColor=vec4(clamp(mix(vec3(dot(s,lw)),s,satBoost),0.0,1.0),1.0);\n}';
+                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 texelSize;\nconst float sharpenFactor=0.35;\nin vec2 vUV;\nout vec4 fragColor;\nvoid main(){\n  vec3 e=texture(data,vUV).rgb;\n  vec3 b=texture(data,vUV+texelSize*vec2(0,1)).rgb;\n  vec3 d=texture(data,vUV+texelSize*vec2(-1,0)).rgb;\n  vec3 f=texture(data,vUV+texelSize*vec2(1,0)).rgb;\n  vec3 h=texture(data,vUV+texelSize*vec2(0,-1)).rgb;\n  const vec3 lw=vec3(0.2126,0.7152,0.0722);\n  float le=dot(e,lw);float lb=dot(b,lw);float ld=dot(d,lw);float lf=dot(f,lw);float lh=dot(h,lw);\n  float mn_l=min(min(min(ld,le),min(lf,lb)),lh);\n  float mx_l=max(max(max(ld,le),max(lf,lb)),lh);\n  float amp=mn_l/(mx_l+0.01);\n  float wm=smoothstep(0.05,0.5,le);\n  float cg=clamp((mx_l-mn_l-0.005)*28.57,0.0,1.0);\n  float w=-(wm*cg)*(amp*0.2);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 det=o-e;\n  vec3 lim=det/(1.0+abs(det)*4.0);\n  vec3 s=e+lim*sharpenFactor;\n  float satBoost=1.0+wm*0.16;\n  fragColor=vec4(clamp(mix(vec3(le),s,satBoost),0.0,1.0),1.0);\n}';
 
                     const mkShader = (type, src) => {
                         const s = gl.createShader(type);
@@ -263,20 +262,19 @@ class MainActivity : AppCompatActivity() {
                     gl.activeTexture(gl.TEXTURE0);
                     gl.uniform1i(gl.getUniformLocation(prog, 'data'), 0);
                     const texelSizeLoc = gl.getUniformLocation(prog, 'texelSize');
-                    gl.uniform1f(gl.getUniformLocation(prog, 'sharpenFactor'), 0.35);
 
                     const bridge = document.createElement('canvas');
                     const bridgeCtx = bridge.getContext('2d', { alpha: false, willReadFrequently: false });
                     bridgeCtx.imageSmoothingEnabled = false;
 
                     let syncTimer = null;
-                    const syncSize = () => { clearTimeout(syncTimer); syncTimer = setTimeout(_syncSize, 200); };
+                    const syncSize = () => { clearTimeout(syncTimer); syncTimer = setTimeout(_syncSize, 500); };
                     const _syncSize = () => {
                         if (!video.videoWidth || !video.videoHeight) return;
                         const w = video.videoWidth;
                         const h = video.videoHeight;
                         const r = video.getBoundingClientRect();
-                        const vz = parseInt(window.getComputedStyle(video).zIndex) || 0;
+                        const vz = +getComputedStyle(video).zIndex || 0;
                         const cz = isNaN(vz) ? 1 : vz + 1;
                         canvas.style.cssText = 'position:fixed;z-index:' + cz + ';top:' + Math.round(r.top) + 'px;left:' + Math.round(r.left) + 'px;width:' + Math.round(r.width) + 'px;height:' + Math.round(r.height) + 'px;pointer-events:none;';
                         if (canvas.width === w && canvas.height === h) return;
@@ -318,9 +316,9 @@ class MainActivity : AppCompatActivity() {
                             if (t !== lastT) {
                                 lastT = t;
                                 bridgeCtx.drawImage(video, 0, 0, bridge.width, bridge.height);
-                                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, bridge);
-                                gl.drawArrays(gl.TRIANGLES, 0, 3);
+                                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bridge);
                             }
+                            gl.drawArrays(gl.TRIANGLES, 0, 3);
                         }
                         scheduleFrame();
                     };
@@ -390,7 +388,7 @@ class MainActivity : AppCompatActivity() {
                             const poll = setInterval(() => {
                                 const toggle = document.querySelector('button[aria-label="Quick Actions Toggle"]');
                                 if (toggle) { clearInterval(poll); hideMenuButton(); }
-                            }, 3000);
+                            }, 5000);
                         }
                     }, 10000);
                     setupWebGLCAS(video);
