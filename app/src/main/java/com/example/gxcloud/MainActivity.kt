@@ -36,10 +36,11 @@ class MainActivity : AppCompatActivity() {
 
         // Limit to 60Hz to save battery
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val mode = display?.supportedModes
-                ?.minByOrNull { abs(it.refreshRate - 60f) }
-            mode?.let {
-                window.attributes.preferredDisplayModeId = it.modeId
+            window.attributes = window.attributes.apply {
+                display?.supportedModes?.minByOrNull { abs(it.refreshRate - 60f) }?.let {
+                    preferredDisplayModeId = it.modeId
+                }
+                preferMinimalPostProcessing = true
             }
         }
 
@@ -171,7 +172,7 @@ class MainActivity : AppCompatActivity() {
                 const quadVerts = new Float32Array([-1,-1,3,-1,-1,3]);
 
                 const style = document.createElement('style');
-                style.textContent = '* { -webkit-tap-highlight-color: transparent !important; outline: none !important; } button[aria-label="Exit preview"] { visibility: hidden !important; }';
+                style.textContent = '* { -webkit-tap-highlight-color: transparent !important; outline: none !important; touch-action: none; } button[aria-label="Exit preview"] { visibility: hidden !important; }';
                 document.head.appendChild(style);
 
                 const hideMenuButton = () => {
@@ -205,7 +206,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     const vert = '#version 300 es\nin vec4 position;\nout vec2 vUV;\nvoid main(){gl_Position=position;vUV=vec2(position.x*0.5+0.5,0.5-position.y*0.5);}';
-                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 texelSize;\nuniform float sharpenFactor;\nin vec2 vUV;\nout vec4 fragColor;\nvoid main(){\n  vec3 e=texture(data,vUV).rgb;\n  vec3 b=texture(data,vUV+texelSize*vec2(0,1)).rgb;\n  vec3 d=texture(data,vUV+texelSize*vec2(-1,0)).rgb;\n  vec3 f=texture(data,vUV+texelSize*vec2(1,0)).rgb;\n  vec3 h=texture(data,vUV+texelSize*vec2(0,-1)).rgb;\n  vec3 lw=vec3(0.2126,0.7152,0.0722);\n  float le=dot(e,lw);float lb=dot(b,lw);float ld=dot(d,lw);float lf=dot(f,lw);float lh=dot(h,lw);\n  float mn_l=min(min(min(ld,le),min(lf,lb)),lh);\n  float mx_l=max(max(max(ld,le),max(lf,lb)),lh);\n  float amp=sqrt(clamp(min(mn_l,2.0-mx_l)/(mx_l+0.01),0.0,1.0));\n  float wm=smoothstep(0.05,0.5,le);\n  float cg=smoothstep(0.005,0.04,mx_l-mn_l);\n  float w=-(wm*amp*cg/8.0);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 det=o-e;\n  vec3 lim=det/(1.0+abs(det)*4.0);\n  vec3 s=e+lim*sharpenFactor;\n  float satBoost=mix(1.0,1.16,wm);\n  fragColor=vec4(clamp(mix(vec3(dot(s,lw)),s,satBoost),0.0,1.0),1.0);\n}';
+                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nuniform vec2 texelSize;\nuniform float sharpenFactor;\nin vec2 vUV;\nout vec4 fragColor;\nvoid main(){\n  vec3 e=texture(data,vUV).rgb;\n  vec3 b=texture(data,vUV+texelSize*vec2(0,1)).rgb;\n  vec3 d=texture(data,vUV+texelSize*vec2(-1,0)).rgb;\n  vec3 f=texture(data,vUV+texelSize*vec2(1,0)).rgb;\n  vec3 h=texture(data,vUV+texelSize*vec2(0,-1)).rgb;\n  const vec3 lw=vec3(0.2126,0.7152,0.0722);\n  float le=dot(e,lw);float lb=dot(b,lw);float ld=dot(d,lw);float lf=dot(f,lw);float lh=dot(h,lw);\n  float mn_l=min(min(min(ld,le),min(lf,lb)),lh);\n  float mx_l=max(max(max(ld,le),max(lf,lb)),lh);\n  float amp=sqrt(clamp(min(mn_l,2.0-mx_l)/(mx_l+0.01),0.0,1.0));\n  float wm=smoothstep(0.05,0.5,le);\n  float cg=smoothstep(0.005,0.04,mx_l-mn_l);\n  float w=-(wm*amp*cg*0.125);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 det=o-e;\n  vec3 lim=det/(1.0+abs(det)*4.0);\n  vec3 s=e+lim*sharpenFactor;\n  float satBoost=mix(1.0,1.16,wm);\n  fragColor=vec4(clamp(mix(vec3(dot(s,lw)),s,satBoost),0.0,1.0),1.0);\n}';
 
                     const mkShader = (type, src) => {
                         const s = gl.createShader(type);
@@ -252,8 +253,8 @@ class MainActivity : AppCompatActivity() {
                     gl.bindTexture(gl.TEXTURE_2D, tex);
 
                     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
                     gl.activeTexture(gl.TEXTURE0);
@@ -261,12 +262,8 @@ class MainActivity : AppCompatActivity() {
                     const texelSizeLoc = gl.getUniformLocation(prog, 'texelSize');
                     gl.uniform1f(gl.getUniformLocation(prog, 'sharpenFactor'), 0.35);
 
-                    const bridge = document.createElement('canvas');
-                    const bridgeCtx = bridge.getContext('2d', { alpha: false, willReadFrequently: false });
-                    bridgeCtx.imageSmoothingEnabled = false;
-
                     let syncTimer = null;
-                    const syncSize = () => { clearTimeout(syncTimer); syncTimer = setTimeout(_syncSize, 200); };
+                    const syncSize = () => { clearTimeout(syncTimer); syncTimer = setTimeout(_syncSize, 100); };
                     const _syncSize = () => {
                         if (!video.videoWidth || !video.videoHeight) return;
                         const w = video.videoWidth;
@@ -276,10 +273,11 @@ class MainActivity : AppCompatActivity() {
                         const cz = isNaN(vz) ? 1 : vz + 1;
                         canvas.style.cssText = 'position:fixed;z-index:' + cz + ';top:' + Math.round(r.top) + 'px;left:' + Math.round(r.left) + 'px;width:' + Math.round(r.width) + 'px;height:' + Math.round(r.height) + 'px;pointer-events:none;';
                         if (canvas.width === w && canvas.height === h) return;
-                        canvas.width = bridge.width = w;
-                        canvas.height = bridge.height = h;
+                        canvas.width = w;
+                        canvas.height = h;
                         gl.viewport(0, 0, w, h);
                         gl.uniform2f(texelSizeLoc, 1.0/w, 1.0/h);
+                        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
                     };
                     _syncSize();
 
@@ -309,9 +307,12 @@ class MainActivity : AppCompatActivity() {
                     const render = () => {
                         frameHandle = null;
                         if (video.readyState >= 2 && !video.paused && !document.hidden) {
-                            bridgeCtx.drawImage(video, 0, 0, bridge.width, bridge.height);
-                            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bridge);
-                            gl.drawArrays(gl.TRIANGLES, 0, 3);
+                            try {
+                                const vf = new VideoFrame(video);
+                                gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, vf);
+                                vf.close();
+                                gl.drawArrays(gl.TRIANGLES, 0, 3);
+                            } catch (_) {}
                         }
                         scheduleFrame();
                     };
@@ -350,7 +351,6 @@ class MainActivity : AppCompatActivity() {
                         video.removeEventListener('resize', syncSize);
                         ro.disconnect();
                         canvas.remove();
-                        bridge.width = 1; bridge.height = 1;
                         gl.getExtension('WEBGL_lose_context')?.loseContext();
                         video.style.visibility = '';
                         delete video.dataset.casSetup;
