@@ -78,6 +78,9 @@ class MainActivity : AppCompatActivity() {
         webView.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
         webView.isHapticFeedbackEnabled = false
         webView.isLongClickable = false
+        webView.setOnHoverListener { _, _ -> true }
+        webView.isSaveEnabled = false
+        webView.isSaveFromParentEnabled = false
 
         // WebView settings
         webView.settings.apply {
@@ -94,6 +97,12 @@ class MainActivity : AppCompatActivity() {
             allowFileAccess = false
             setNeedInitialFocus(false)
             setOffscreenPreRaster(false)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                setAlgorithmicDarkeningAllowed(false)
+            } else {
+                @Suppress("DEPRECATION")
+                forceDark = android.webkit.WebSettings.FORCE_DARK_OFF
+            }
         }
 
         // Allow cookies
@@ -175,6 +184,7 @@ class MainActivity : AppCompatActivity() {
                 document.body.style.overscrollBehavior = 'none';
 
                 const triVerts = new Float32Array([-1,-1,3,-1,-1,3]);
+                const EMPTY_PIXEL = new Uint8Array([0,0,0,255]);
 
                 const bridge = document.createElement('canvas');
                 const bridgeCtx = bridge.getContext('2d', { alpha: false, willReadFrequently: false });
@@ -271,7 +281,7 @@ class MainActivity : AppCompatActivity() {
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
+                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, EMPTY_PIXEL);
                     gl.activeTexture(gl.TEXTURE0);
                     gl.uniform1i(gl.getUniformLocation(prog, 'data'), 0);
                     const texelSizeLoc = gl.getUniformLocation(prog, 'texelSize');
@@ -403,7 +413,7 @@ class MainActivity : AppCompatActivity() {
                             poll = setInterval(() => {
                                 const toggle = document.querySelector('button[aria-label="Quick Actions Toggle"]');
                                 if (toggle) { clearInterval(poll); poll = null; hideMenuButton(); }
-                            }, 6000);
+                            }, 7000);
                         }
                     }, 10000);
                     setupWebGLCAS(video);
