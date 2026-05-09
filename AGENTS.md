@@ -154,6 +154,32 @@ bridgeCtx.globalCompositeOperation = 'copy';
 
 ---
 
+## Discord Overlay
+
+### State machine
+Three states: `CLOSED → UI_VISIBLE → GAME_MODE`. 4 rapid taps advances the state; closing from GAME_MODE returns to CLOSED.
+
+### Toggle gates everything
+`discordEnabled` (driven by a `SwitchCompat` on the dashboard) is the single gate. When false, `onFourTaps()` returns immediately — no Discord WebView is loaded, no network activity, no battery cost. Do not add secondary `isStreaming` guards; the toggle is intentionally the only gate so Discord can be opened mid-stream.
+
+### Toggle placement
+The `SwitchCompat` (`discordToggle`) starts `GONE`. JS injection polls for `button[aria-label="Exit preview"]` (the dashboard button hidden via injected CSS) and calls `AndroidBridge.setTogglePosition(x, y, w, h)` with its physical pixel coords (CSS px × `devicePixelRatio`). The bridge method sets `leftMargin`/`topMargin` on the `FrameLayout.LayoutParams` and sets visibility to `VISIBLE`. The toggle is never shown during streaming or when Discord is open.
+
+### Microphone permission
+Requested only on the first `openDiscord()` call, not at startup. Discord defaults to disabled, so requesting at startup would prompt the user before they've opted in to Discord at all.
+
+### Discord WebView optimisations
+- **`blockNetworkImage = true`** in GAME_MODE — stops image fetches while Discord is hidden; audio/JS keeps running
+- **`RENDERER_PRIORITY_WAIVED`** in GAME_MODE — deprioritises Discord's renderer process
+- **`RENDERER_PRIORITY_IMPORTANT`** when UI is visible — ensures Discord renders correctly
+- **`discordContainer` set to `GONE` in GAME_MODE** — stops touch interception and rendering of the overlay without destroying the WebView session
+- **`about:blank` on close** — releases Discord's network connections and DOM memory on full close
+
+### Why a separate WebView for Discord
+Discord Web requires `domStorage`, media permissions, and a desktop user-agent. Sharing the main WebView with Xbox would require constant URL switching and lose game session state. A separate WebView lets both run independently.
+
+---
+
 ## CSS / JS
 
 - **`canvas.style.contain = 'strict'`** — tells browser this canvas is independent from page layout; prevents layout/paint recalculation from propagating through/to the canvas
