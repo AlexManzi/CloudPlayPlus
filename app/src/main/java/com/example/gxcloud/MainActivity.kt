@@ -1,29 +1,81 @@
 package com.example.gxcloud
 
+import android.Manifest
 import android.annotation.SuppressLint
+import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewStub
 import android.view.WindowManager
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
+import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import androidx.activity.addCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
+import android.widget.Switch
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
+    private lateinit var discordStub: ViewStub
+    private var discordContainer: FrameLayout? = null
+    private var discordWebView: WebView? = null
+    private lateinit var discordToggle: Switch
     private lateinit var audioManager: AudioManager
     private lateinit var audioFocusRequest: AudioFocusRequest
+
+    private enum class DiscordState { CLOSED, UI_VISIBLE, GAME_MODE }
+    private var discordState = DiscordState.CLOSED
+    private var discordEnabled = false
+    private var togglePositioned = false
+    private var tapCount = 0
+    private val tapHandler = Handler(Looper.getMainLooper())
+    private val viewLocation = IntArray(2)
+    @Volatile private var isStreaming = false
+
+    inner class StreamBridge {
+        @JavascriptInterface
+        fun setStreaming(active: Boolean) {
+            isStreaming = active
+            runOnUiThread {
+                discordToggle.visibility =
+                    if (!active && discordState == DiscordState.CLOSED && togglePositioned) View.VISIBLE
+                    else View.GONE
+            }
+        }
+
+        @JavascriptInterface
+        fun setTogglePosition(x: Int, y: Int, width: Int, height: Int) {
+            runOnUiThread {
+                val params = discordToggle.layoutParams as FrameLayout.LayoutParams
+                params.gravity = Gravity.NO_GRAVITY
+                params.leftMargin = x
+                params.topMargin = y
+                discordToggle.layoutParams = params
+                togglePositioned = true
+                if (!isStreaming && discordState == DiscordState.CLOSED) {
+                    discordToggle.visibility = View.VISIBLE
+                }
+            }
+        }
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -108,6 +160,7 @@ class MainActivity : AppCompatActivity() {
         // Allow cookies
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
 
+        webView.addJavascriptInterface(StreamBridge(), "AndroidBridge")
         webView.webChromeClient = WebChromeClient()
 
         webView.webViewClient = object : WebViewClient() {
@@ -116,6 +169,11 @@ class MainActivity : AppCompatActivity() {
                 if (url == view.url) view.evaluateJavascript(INJECT_SCRIPT, null)
             }
         }
+
+        discordToggle = findViewById(R.id.discordToggle)
+        discordToggle.setOnCheckedChangeListener { _, checked -> discordEnabled = checked }
+
+        discordStub = findViewById(R.id.discordStub)
 
         setupBackHandler()
         webView.loadUrl("https://play.xbox.com/")
@@ -126,6 +184,7 @@ class MainActivity : AppCompatActivity() {
         webView.resumeTimers()
         webView.onResume()
         webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+        if (discordState != DiscordState.CLOSED) discordWebView?.onResume()
         audioManager.requestAudioFocus(audioFocusRequest)
     }
 
@@ -134,14 +193,17 @@ class MainActivity : AppCompatActivity() {
         webView.onPause()
         webView.pauseTimers()
         webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_WAIVED, true)
+        if (discordState != DiscordState.CLOSED) discordWebView?.onPause()
         audioManager.abandonAudioFocusRequest(audioFocusRequest)
     }
 
     override fun onDestroy() {
-        CookieManager.getInstance().flush()
         webView.webViewClient = WebViewClient()
         webView.webChromeClient = null
         webView.destroy()
+        discordWebView?.webViewClient = WebViewClient()
+        discordWebView?.webChromeClient = null
+        discordWebView?.destroy()
         super.onDestroy()
     }
 
@@ -155,6 +217,116 @@ class MainActivity : AppCompatActivity() {
                             or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                     )
         }
+    }
+
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.action == MotionEvent.ACTION_DOWN) {
+            if (!discordEnabled && discordState == DiscordState.CLOSED) return super.dispatchTouchEvent(ev)
+            val countTap = discordState != DiscordState.UI_VISIBLE || !isTapOnDiscord(ev)
+            if (countTap) {
+                tapCount++
+                tapHandler.removeCallbacksAndMessages(null)
+                if (tapCount >= 4) {
+                    tapCount = 0
+                    onFourTaps()
+                } else {
+                    tapHandler.postDelayed({ tapCount = 0 }, 600)
+                }
+            }
+        }
+        return super.dispatchTouchEvent(ev)
+    }
+
+    private fun isTapOnDiscord(ev: MotionEvent): Boolean {
+        discordWebView!!.getLocationOnScreen(viewLocation)
+        return ev.rawX >= viewLocation[0] && ev.rawX <= viewLocation[0] + discordWebView!!.width &&
+               ev.rawY >= viewLocation[1] && ev.rawY <= viewLocation[1] + discordWebView!!.height
+    }
+
+    private fun onFourTaps() {
+        if (!discordEnabled) return
+        when (discordState) {
+            DiscordState.CLOSED -> openDiscord()
+            DiscordState.UI_VISIBLE -> enableGameMode()
+            DiscordState.GAME_MODE -> closeDiscord()
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun inflateDiscord() {
+        val root = discordStub.inflate() as FrameLayout
+        discordContainer = root
+        discordWebView = root.findViewById<WebView>(R.id.discordWebView).also { dv ->
+            dv.overScrollMode = View.OVER_SCROLL_NEVER
+            dv.isVerticalScrollBarEnabled = false
+            dv.isHorizontalScrollBarEnabled = false
+            dv.isHapticFeedbackEnabled = false
+            dv.isLongClickable = false
+            dv.isSaveEnabled = false
+            dv.isSaveFromParentEnabled = false
+            dv.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
+            dv.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+            dv.setBackgroundColor(android.graphics.Color.BLACK)
+            dv.settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                mediaPlaybackRequiresUserGesture = true
+                userAgentString = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                setSupportZoom(false)
+                builtInZoomControls = false
+                textZoom = 100
+                safeBrowsingEnabled = false
+                setOffscreenPreRaster(false)
+                setNeedInitialFocus(false)
+                setGeolocationEnabled(false)
+                allowFileAccess = false
+                allowContentAccess = false
+                mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            }
+            CookieManager.getInstance().setAcceptThirdPartyCookies(dv, true)
+            dv.webChromeClient = object : WebChromeClient() {
+                override fun onPermissionRequest(request: PermissionRequest) {
+                    val allowed = request.resources.filter { it == PermissionRequest.RESOURCE_AUDIO_CAPTURE }
+                    if (allowed.isNotEmpty()) request.grant(allowed.toTypedArray()) else request.deny()
+                }
+            }
+            dv.webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView, url: String) {
+                    if (url == "about:blank") { view.clearHistory(); view.onPause() }
+                }
+            }
+        }
+    }
+
+    private fun openDiscord() {
+        if (discordContainer == null) inflateDiscord()
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 0)
+        }
+        discordToggle.visibility = View.GONE
+        discordWebView!!.onResume()
+        discordWebView!!.settings.blockNetworkImage = false
+        discordWebView!!.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+        discordContainer!!.visibility = View.VISIBLE
+        discordWebView!!.loadUrl("https://discord.com/app")
+        discordState = DiscordState.UI_VISIBLE
+    }
+
+    private fun enableGameMode() {
+        // Container GONE stops rendering and touch interception; JS/audio keeps running
+        discordContainer!!.visibility = View.GONE
+        discordWebView!!.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_WAIVED, true)
+        discordWebView!!.settings.blockNetworkImage = true
+        discordState = DiscordState.GAME_MODE
+    }
+
+    private fun closeDiscord() {
+        discordWebView!!.loadUrl("about:blank")
+        discordWebView!!.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_WAIVED, true)
+        discordContainer!!.visibility = View.GONE
+        discordState = DiscordState.CLOSED
+        if (!isStreaming && togglePositioned) discordToggle.visibility = View.VISIBLE
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -195,6 +367,41 @@ class MainActivity : AppCompatActivity() {
                 style.textContent = '* { -webkit-tap-highlight-color: transparent !important; outline: none !important; } button[aria-label="Exit preview"] { visibility: hidden !important; }';
                 document.head.appendChild(style);
 
+                let posInterval = null;
+                let exitBtnFound = false;
+
+                const reportExitButtonPosition = () => {
+                    const btn = document.querySelector('button[aria-label="Exit preview"]');
+                    if (btn && typeof AndroidBridge !== 'undefined') {
+                        const r = btn.getBoundingClientRect();
+                        const dpr = window.devicePixelRatio || 1;
+                        AndroidBridge.setTogglePosition(
+                            Math.round(r.left * dpr),
+                            Math.round(r.top * dpr),
+                            Math.round(r.width * dpr),
+                            Math.round(r.height * dpr)
+                        );
+                        exitBtnFound = true;
+                        return true;
+                    }
+                    return false;
+                };
+
+                const startExitBtnPolling = () => {
+                    if (exitBtnFound || posInterval !== null) return;
+                    if (!reportExitButtonPosition()) {
+                        posInterval = setInterval(() => {
+                            if (reportExitButtonPosition()) { clearInterval(posInterval); posInterval = null; }
+                        }, 2000);
+                    }
+                };
+
+                const stopExitBtnPolling = () => {
+                    if (posInterval !== null) { clearInterval(posInterval); posInterval = null; }
+                };
+
+                startExitBtnPolling();
+
                 const hideMenuButton = () => {
                     const toggle = document.querySelector('button[aria-label="Quick Actions Toggle"]');
                     if (toggle) {
@@ -215,7 +422,6 @@ class MainActivity : AppCompatActivity() {
                     video.dataset.casSetup = 'true';
 
                     const canvas = document.createElement('canvas');
-                    canvas.style.contain = 'strict';
                     video.parentNode.insertBefore(canvas, video);
                     video.style.visibility = 'hidden';
 
@@ -295,7 +501,7 @@ class MainActivity : AppCompatActivity() {
                         const r = video.getBoundingClientRect();
                         const vz = +getComputedStyle(video).zIndex || 0;
                         const cz = isNaN(vz) ? 1 : vz + 1;
-                        canvas.style.cssText = 'position:fixed;z-index:' + cz + ';top:' + Math.round(r.top) + 'px;left:' + Math.round(r.left) + 'px;width:' + Math.round(r.width) + 'px;height:' + Math.round(r.height) + 'px;pointer-events:none;';
+                        canvas.style.cssText = 'position:fixed;contain:strict;z-index:' + cz + ';top:' + Math.round(r.top) + 'px;left:' + Math.round(r.left) + 'px;width:' + Math.round(r.width) + 'px;height:' + Math.round(r.height) + 'px;pointer-events:none;';
                         if (canvas.width === w && canvas.height === h) return;
                         canvas.width = bridge.width = w;
                         canvas.height = bridge.height = h;
@@ -339,7 +545,7 @@ class MainActivity : AppCompatActivity() {
                         if (video.readyState >= 2 && !video.paused && !document.hidden) {
                             if (newFrame || !hasRVFC) {
                                 newFrame = false;
-                                bridgeCtx.drawImage(video, 0, 0, bridge.width, bridge.height);
+                                bridgeCtx.drawImage(video, 0, 0);
                                 gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bridge);
                                 gl.drawArrays(gl.TRIANGLES, 0, 3);
                             }
@@ -416,6 +622,8 @@ class MainActivity : AppCompatActivity() {
                             }, 7000);
                         }
                     }, 10000);
+                    stopExitBtnPolling();
+                    if (typeof AndroidBridge !== 'undefined') AndroidBridge.setStreaming(true);
                     setupWebGLCAS(video);
                     watchForVideoRemoval(video, menuObserver, () => { if (poll) { clearInterval(poll); poll = null; } });
                 };
@@ -433,6 +641,8 @@ class MainActivity : AppCompatActivity() {
                             menuObserver.disconnect();
                             onCleanup();
                             if (video._casCleanup) video._casCleanup();
+                            if (typeof AndroidBridge !== 'undefined') AndroidBridge.setStreaming(false);
+                            startExitBtnPolling();
                             startWatching();
                         }
                     });

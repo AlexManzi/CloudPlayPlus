@@ -9,6 +9,7 @@ CloudPlayPlus focuses on simplicity, performance, and a clean experience—ideal
 
 - **Instant Launch** — Opens Xbox Cloud Gaming quickly without extra UI clutter.
 - **AMD FidelityFX CAS** — CloudPlayPlus applies AMD's Contrast Adaptive Sharpening (CAS) algorithm via a WebGL2 fragment shader to make Xbox Cloud Gaming streams clearer. CAS reduces the soft, blurred look of video-based streaming and improves text and UI crispness without adding latency. The shader uses luma-weighted sharpening (suppressing sharpening in dark areas to avoid noise amplification) and hooks into `requestVideoFrameCallback` for frame-accurate rendering. Runs with a `low-power` WebGL context to preserve battery life.
+- **Discord Overlay** — A toggle on the dashboard enables Discord mode. When active, 4 rapid taps opens a Discord window (works on the dashboard and mid-stream). 4 more taps hides the Discord UI into game mode (audio stays live); 4 more closes it fully. When the toggle is off, 4 taps does nothing and Discord adds zero overhead.
 - **Lightweight** — Built with Kotlin and minimal dependencies, <800kb app size>.  
 - **Android‑Native** — Uses modern Android tooling (Gradle Kotlin DSL, AndroidX).  
 - **Open Source** — Simple codebase designed for learning, modding, and extending.
