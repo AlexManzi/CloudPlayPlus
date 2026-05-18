@@ -44,14 +44,7 @@ class MainActivity : AppCompatActivity() {
     private var tapCount = 0
     private val tapHandler = Handler(Looper.getMainLooper())
     private val viewLocation = IntArray(2)
-    @Volatile private var isStreaming = false
-
     inner class StreamBridge {
-        @JavascriptInterface
-        fun setStreaming(active: Boolean) {
-            isStreaming = active
-        }
-
         @JavascriptInterface
         fun setDiscordEnabled(enabled: Boolean) {
             discordEnabled = enabled
@@ -333,41 +326,6 @@ class MainActivity : AppCompatActivity() {
                 style.textContent = '* { -webkit-tap-highlight-color: transparent !important; outline: none !important; } button[aria-label="Exit preview"] { visibility: hidden !important; }';
                 document.head.appendChild(style);
 
-                let posInterval = null;
-                let exitBtnFound = false;
-
-                const reportExitButtonPosition = () => {
-                    const btn = document.querySelector('button[aria-label="Exit preview"]');
-                    if (btn && typeof AndroidBridge !== 'undefined') {
-                        const r = btn.getBoundingClientRect();
-                        const dpr = window.devicePixelRatio || 1;
-                        AndroidBridge.setTogglePosition(
-                            Math.round(r.left * dpr),
-                            Math.round(r.top * dpr),
-                            Math.round(r.width * dpr),
-                            Math.round(r.height * dpr)
-                        );
-                        exitBtnFound = true;
-                        return true;
-                    }
-                    return false;
-                };
-
-                const startExitBtnPolling = () => {
-                    if (exitBtnFound || posInterval !== null) return;
-                    if (!reportExitButtonPosition()) {
-                        posInterval = setInterval(() => {
-                            if (reportExitButtonPosition()) { clearInterval(posInterval); posInterval = null; }
-                        }, 2000);
-                    }
-                };
-
-                const stopExitBtnPolling = () => {
-                    if (posInterval !== null) { clearInterval(posInterval); posInterval = null; }
-                };
-
-                startExitBtnPolling();
-
                 const hideMenuButton = () => {
                     const toggle = document.querySelector('button[aria-label="Quick Actions Toggle"]');
                     if (toggle) {
@@ -465,8 +423,6 @@ class MainActivity : AppCompatActivity() {
                         const w = video.videoWidth;
                         const h = video.videoHeight;
                         const r = video.getBoundingClientRect();
-                        const vz = +getComputedStyle(video).zIndex || 0;
-                        const cz = isNaN(vz) ? 1 : vz + 1;
                         canvas.style.cssText = 'position:static;contain:strict;width:' + Math.round(r.width) + 'px;height:' + Math.round(r.height) + 'px;pointer-events:none;';
                         if (canvas.width === w && canvas.height === h) return;
                         canvas.width = bridge.width = w;
@@ -588,8 +544,6 @@ class MainActivity : AppCompatActivity() {
                             }, 7000);
                         }
                     }, 10000);
-                    stopExitBtnPolling();
-                    if (typeof AndroidBridge !== 'undefined') AndroidBridge.setStreaming(true);
                     setupWebGLCAS(video);
                     watchForVideoRemoval(video, menuObserver, () => { if (poll) { clearInterval(poll); poll = null; } });
                 };
@@ -607,8 +561,6 @@ class MainActivity : AppCompatActivity() {
                             menuObserver.disconnect();
                             onCleanup();
                             if (video._casCleanup) video._casCleanup();
-                            if (typeof AndroidBridge !== 'undefined') AndroidBridge.setStreaming(false);
-                            startExitBtnPolling();
                             startWatching();
                         }
                     });
