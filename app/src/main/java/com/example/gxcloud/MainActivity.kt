@@ -239,7 +239,7 @@ class MainActivity : AppCompatActivity() {
             dv.settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = true
-                mediaPlaybackRequiresUserGesture = true
+                mediaPlaybackRequiresUserGesture = false
                 userAgentString = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                 setSupportZoom(false)
                 builtInZoomControls = false
@@ -327,9 +327,9 @@ class MainActivity : AppCompatActivity() {
                 document.head.appendChild(style);
 
                 const hideMenuButton = () => {
-                    const toggle = document.querySelector('button[aria-label="Quick Actions Toggle"]');
+                    const toggle = document.querySelector('button[aria-label="Quick actions toggle" i]');
                     if (toggle) {
-                        const container = toggle.closest('.absolute');
+                        const container = toggle.closest('.absolute') ?? toggle.parentElement;
                         if (container && !container.dataset.hidden) {
                             container.dataset.hidden = 'true';
                             container.style.visibility = 'hidden';
@@ -391,7 +391,6 @@ class MainActivity : AppCompatActivity() {
                     gl.useProgram(prog);
                     gl.disable(gl.BLEND);
                     gl.disable(gl.DITHER);
-                    gl.hint(gl.GENERATE_MIPMAP_HINT, gl.FASTEST);
 
                     const vao = gl.createVertexArray();
                     gl.bindVertexArray(vao);
@@ -417,7 +416,7 @@ class MainActivity : AppCompatActivity() {
                     const texelSizeLoc = gl.getUniformLocation(prog, 'texelSize');
 
                     let syncTimer = null;
-                    const syncSize = () => { clearTimeout(syncTimer); syncTimer = setTimeout(_syncSize, 50); };
+                    const syncSize = () => { clearTimeout(syncTimer); syncTimer = setTimeout(_syncSize, 16); };
                     const _syncSize = () => {
                         if (!video.videoWidth || !video.videoHeight) return;
                         const w = video.videoWidth;
@@ -467,7 +466,7 @@ class MainActivity : AppCompatActivity() {
                         if (video.readyState >= 2 && !video.paused && !document.hidden) {
                             if (newFrame || !hasRVFC) {
                                 newFrame = false;
-                                bridgeCtx.drawImage(video, 0, 0);
+                                bridgeCtx.drawImage(video, 0, 0, bridge.width, bridge.height);
                                 gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bridge);
                                 gl.drawArrays(gl.TRIANGLES, 0, 3);
                             }
@@ -522,7 +521,7 @@ class MainActivity : AppCompatActivity() {
                     let poll = null;
                     const menuObserver = new MutationObserver((mutations) => {
                         if (!mutations.some(m => m.addedNodes.length > 0)) return;
-                        const toggle = document.querySelector('button[aria-label="Quick Actions Toggle"]');
+                        const toggle = document.querySelector('button[aria-label="Quick actions toggle" i]');
                         if (toggle) {
                             menuFound = true;
                             clearTimeout(menuTimeout);
@@ -539,7 +538,7 @@ class MainActivity : AppCompatActivity() {
                         if (!menuFound) {
                             menuObserver.disconnect();
                             poll = setInterval(() => {
-                                const toggle = document.querySelector('button[aria-label="Quick Actions Toggle"]');
+                                const toggle = document.querySelector('button[aria-label="Quick actions toggle" i]');
                                 if (toggle) { clearInterval(poll); poll = null; hideMenuButton(); }
                             }, 7000);
                         }
@@ -625,14 +624,16 @@ class MainActivity : AppCompatActivity() {
                     jpObserver.observe(document.body, { childList: true, subtree: true });
                 };
                 const watchForJumpPanelRemoval = (panel) => {
+                    const parent = panel.parentNode;
+                    if (!parent) return;
                     const removalObserver = new MutationObserver(() => {
-                        if (!document.contains(panel)) {
+                        if (!parent.contains(panel)) {
                             removalObserver.disconnect();
                             if (panel._discordReinjector) { panel._discordReinjector.disconnect(); panel._discordReinjector = null; }
                             watchForJumpPanel();
                         }
                     });
-                    removalObserver.observe(document.body, { childList: true, subtree: true });
+                    removalObserver.observe(parent, { childList: true });
                 };
                 watchForJumpPanel();
 
