@@ -1,29 +1,55 @@
 package com.example.gxcloud
 
+import android.Manifest
 import android.annotation.SuppressLint
+import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewStub
 import android.view.WindowManager
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
+import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import androidx.activity.addCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
+    private lateinit var discordStub: ViewStub
+    private var discordContainer: FrameLayout? = null
+    private var discordWebView: WebView? = null
     private lateinit var audioManager: AudioManager
     private lateinit var audioFocusRequest: AudioFocusRequest
+
+    private enum class DiscordState { CLOSED, UI_VISIBLE }
+    private var discordState = DiscordState.CLOSED
+    private var discordEnabled = false
+    private var tapCount = 0
+    private val tapHandler = Handler(Looper.getMainLooper())
+    private val viewLocation = IntArray(2)
+    inner class StreamBridge {
+        @JavascriptInterface
+        fun setDiscordEnabled(enabled: Boolean) {
+            discordEnabled = enabled
+        }
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -108,6 +134,7 @@ class MainActivity : AppCompatActivity() {
         // Allow cookies
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
 
+        webView.addJavascriptInterface(StreamBridge(), "AndroidBridge")
         webView.webChromeClient = WebChromeClient()
 
         webView.webViewClient = object : WebViewClient() {
@@ -116,6 +143,8 @@ class MainActivity : AppCompatActivity() {
                 if (url == view.url) view.evaluateJavascript(INJECT_SCRIPT, null)
             }
         }
+
+        discordStub = findViewById(R.id.discordStub)
 
         setupBackHandler()
         webView.loadUrl("https://play.xbox.com/")
@@ -126,6 +155,7 @@ class MainActivity : AppCompatActivity() {
         webView.resumeTimers()
         webView.onResume()
         webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+        if (discordState != DiscordState.CLOSED) discordWebView?.onResume()
         audioManager.requestAudioFocus(audioFocusRequest)
     }
 
@@ -134,14 +164,17 @@ class MainActivity : AppCompatActivity() {
         webView.onPause()
         webView.pauseTimers()
         webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_WAIVED, true)
+        if (discordState != DiscordState.CLOSED) discordWebView?.onPause()
         audioManager.abandonAudioFocusRequest(audioFocusRequest)
     }
 
     override fun onDestroy() {
-        CookieManager.getInstance().flush()
         webView.webViewClient = WebViewClient()
         webView.webChromeClient = null
         webView.destroy()
+        discordWebView?.webViewClient = WebViewClient()
+        discordWebView?.webChromeClient = null
+        discordWebView?.destroy()
         super.onDestroy()
     }
 
@@ -155,6 +188,104 @@ class MainActivity : AppCompatActivity() {
                             or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                     )
         }
+    }
+
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.action == MotionEvent.ACTION_DOWN) {
+            if (!discordEnabled && discordState == DiscordState.CLOSED) return super.dispatchTouchEvent(ev)
+            val countTap = discordState != DiscordState.UI_VISIBLE || !isTapOnDiscord(ev)
+            if (countTap) {
+                tapCount++
+                tapHandler.removeCallbacksAndMessages(null)
+                if (tapCount >= 4) {
+                    tapCount = 0
+                    onFourTaps()
+                } else {
+                    tapHandler.postDelayed({ tapCount = 0 }, 600)
+                }
+            }
+        }
+        return super.dispatchTouchEvent(ev)
+    }
+
+    private fun isTapOnDiscord(ev: MotionEvent): Boolean {
+        discordWebView!!.getLocationOnScreen(viewLocation)
+        return ev.rawX >= viewLocation[0] && ev.rawX <= viewLocation[0] + discordWebView!!.width &&
+               ev.rawY >= viewLocation[1] && ev.rawY <= viewLocation[1] + discordWebView!!.height
+    }
+
+    private fun onFourTaps() {
+        when (discordState) {
+            DiscordState.CLOSED -> if (discordEnabled) openDiscord()
+            DiscordState.UI_VISIBLE -> closeDiscord()
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun inflateDiscord() {
+        val root = discordStub.inflate() as FrameLayout
+        discordContainer = root
+        discordWebView = root.findViewById<WebView>(R.id.discordWebView).also { dv ->
+            dv.overScrollMode = View.OVER_SCROLL_NEVER
+            dv.isVerticalScrollBarEnabled = false
+            dv.isHorizontalScrollBarEnabled = false
+            dv.isHapticFeedbackEnabled = false
+            dv.isLongClickable = false
+            dv.isSaveEnabled = false
+            dv.isSaveFromParentEnabled = false
+            dv.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
+            dv.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+            dv.setBackgroundColor(android.graphics.Color.BLACK)
+            dv.settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                mediaPlaybackRequiresUserGesture = false
+                userAgentString = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                setSupportZoom(false)
+                builtInZoomControls = false
+                textZoom = 100
+                safeBrowsingEnabled = false
+                setOffscreenPreRaster(false)
+                setNeedInitialFocus(false)
+                setGeolocationEnabled(false)
+                allowFileAccess = false
+                allowContentAccess = false
+                mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            }
+            CookieManager.getInstance().setAcceptThirdPartyCookies(dv, true)
+            dv.webChromeClient = object : WebChromeClient() {
+                override fun onPermissionRequest(request: PermissionRequest) {
+                    val allowed = request.resources.filter { it == PermissionRequest.RESOURCE_AUDIO_CAPTURE }
+                    if (allowed.isNotEmpty()) request.grant(allowed.toTypedArray()) else request.deny()
+                }
+            }
+            dv.webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView, url: String) {
+                    if (url == "about:blank") { view.clearHistory(); view.onPause() }
+                }
+            }
+        }
+    }
+
+    private fun openDiscord() {
+        if (discordContainer == null) inflateDiscord()
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 0)
+        }
+        discordWebView!!.onResume()
+        discordWebView!!.settings.blockNetworkImage = false
+        discordWebView!!.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+        discordContainer!!.visibility = View.VISIBLE
+        discordWebView!!.loadUrl("https://discord.com/app")
+        discordState = DiscordState.UI_VISIBLE
+    }
+
+    private fun closeDiscord() {
+        discordWebView!!.loadUrl("about:blank")
+        discordWebView!!.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_WAIVED, true)
+        discordContainer!!.visibility = View.GONE
+        discordState = DiscordState.CLOSED
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -196,9 +327,9 @@ class MainActivity : AppCompatActivity() {
                 document.head.appendChild(style);
 
                 const hideMenuButton = () => {
-                    const toggle = document.querySelector('button[aria-label="Quick Actions Toggle"]');
+                    const toggle = document.querySelector('button[aria-label="Quick actions toggle" i]');
                     if (toggle) {
-                        const container = toggle.closest('.absolute');
+                        const container = toggle.closest('.absolute') ?? toggle.parentElement;
                         if (container && !container.dataset.hidden) {
                             container.dataset.hidden = 'true';
                             container.style.visibility = 'hidden';
@@ -215,7 +346,6 @@ class MainActivity : AppCompatActivity() {
                     video.dataset.casSetup = 'true';
 
                     const canvas = document.createElement('canvas');
-                    canvas.style.contain = 'strict';
                     video.parentNode.insertBefore(canvas, video);
                     video.style.visibility = 'hidden';
 
@@ -261,7 +391,6 @@ class MainActivity : AppCompatActivity() {
                     gl.useProgram(prog);
                     gl.disable(gl.BLEND);
                     gl.disable(gl.DITHER);
-                    gl.hint(gl.GENERATE_MIPMAP_HINT, gl.FASTEST);
 
                     const vao = gl.createVertexArray();
                     gl.bindVertexArray(vao);
@@ -287,15 +416,13 @@ class MainActivity : AppCompatActivity() {
                     const texelSizeLoc = gl.getUniformLocation(prog, 'texelSize');
 
                     let syncTimer = null;
-                    const syncSize = () => { clearTimeout(syncTimer); syncTimer = setTimeout(_syncSize, 50); };
+                    const syncSize = () => { clearTimeout(syncTimer); syncTimer = setTimeout(_syncSize, 16); };
                     const _syncSize = () => {
                         if (!video.videoWidth || !video.videoHeight) return;
                         const w = video.videoWidth;
                         const h = video.videoHeight;
                         const r = video.getBoundingClientRect();
-                        const vz = +getComputedStyle(video).zIndex || 0;
-                        const cz = isNaN(vz) ? 1 : vz + 1;
-                        canvas.style.cssText = 'position:fixed;z-index:' + cz + ';top:' + Math.round(r.top) + 'px;left:' + Math.round(r.left) + 'px;width:' + Math.round(r.width) + 'px;height:' + Math.round(r.height) + 'px;pointer-events:none;';
+                        canvas.style.cssText = 'position:static;contain:strict;width:' + Math.round(r.width) + 'px;height:' + Math.round(r.height) + 'px;pointer-events:none;';
                         if (canvas.width === w && canvas.height === h) return;
                         canvas.width = bridge.width = w;
                         canvas.height = bridge.height = h;
@@ -394,7 +521,7 @@ class MainActivity : AppCompatActivity() {
                     let poll = null;
                     const menuObserver = new MutationObserver((mutations) => {
                         if (!mutations.some(m => m.addedNodes.length > 0)) return;
-                        const toggle = document.querySelector('button[aria-label="Quick Actions Toggle"]');
+                        const toggle = document.querySelector('button[aria-label="Quick actions toggle" i]');
                         if (toggle) {
                             menuFound = true;
                             clearTimeout(menuTimeout);
@@ -411,7 +538,7 @@ class MainActivity : AppCompatActivity() {
                         if (!menuFound) {
                             menuObserver.disconnect();
                             poll = setInterval(() => {
-                                const toggle = document.querySelector('button[aria-label="Quick Actions Toggle"]');
+                                const toggle = document.querySelector('button[aria-label="Quick actions toggle" i]');
                                 if (toggle) { clearInterval(poll); poll = null; hideMenuButton(); }
                             }, 7000);
                         }
@@ -447,6 +574,68 @@ class MainActivity : AppCompatActivity() {
                         foundVideo(video);
                     }
                 });
+
+                let discordEnabledJS = false;
+
+                const injectDiscordToggle = (panel) => {
+                    if (panel.dataset.discordInjected) return;
+                    const section = panel.querySelector('section[data-auto-focus="true"]');
+                    if (!section) {
+                        const waitObserver = new MutationObserver(() => {
+                            const s = panel.querySelector('section[data-auto-focus="true"]');
+                            if (s) { waitObserver.disconnect(); injectDiscordToggle(panel); }
+                        });
+                        waitObserver.observe(panel, { childList: true, subtree: true });
+                        return;
+                    }
+                    panel.dataset.discordInjected = 'true';
+                    const buildToggleEl = () => {
+                        const el = document.createElement('div');
+                        el.id = '__discord-toggle-item';
+                        el.style.cssText = 'display:flex;align-items:center;min-height:52px;padding:0 16px;gap:12px;cursor:pointer;';
+                        el.innerHTML = '<svg style="width:20px;height:20px;flex-shrink:0;fill:#fff;" viewBox="0 0 127.14 96.36"><path d="M107.7 8.07A105.2 105.2 0 0 0 81.47 0a72.1 72.1 0 0 0-3.36 6.83 97.7 97.7 0 0 0-29.11 0A72.3 72.3 0 0 0 45.64 0a105.9 105.9 0 0 0-26.25 8.09C2.79 32.65-1.71 56.6.54 80.21a105.7 105.7 0 0 0 32.17 16.15 77.7 77.7 0 0 0 6.89-11.11 68.4 68.4 0 0 1-10.85-5.18l2.56-2a75.6 75.6 0 0 0 64.58 0l2.59 2a68.3 68.3 0 0 1-10.87 5.19 77 77 0 0 0 6.89 11.1 105.3 105.3 0 0 0 32.19-16.14c2.64-27.38-4.51-51.11-18.9-72.15ZM42.45 65.69C36.18 65.69 31 60 31 53s5-12.74 11.43-12.74S54 46 53.89 53s-5.05 12.69-11.44 12.69Zm42.24 0C78.41 65.69 73.25 60 73.25 53s5-12.74 11.44-12.74S96.23 46 96.12 53s-5 12.69-11.43 12.69Z"/></svg><span style="flex:1;color:#fff;font-size:14px;">Discord</span><span class="__dt-track" style="position:relative;display:inline-block;width:44px;height:24px;border-radius:12px;background:#555;flex-shrink:0;transition:background .2s;"><span class="__dt-thumb" style="position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;transition:transform .2s;"></span></span>';
+                        const track = el.querySelector('.__dt-track');
+                        const thumb = el.querySelector('.__dt-thumb');
+                        track.style.background = discordEnabledJS ? '#5865F2' : '#555';
+                        thumb.style.transform = discordEnabledJS ? 'translateX(20px)' : 'translateX(0)';
+                        el.addEventListener('click', () => {
+                            discordEnabledJS = !discordEnabledJS;
+                            track.style.background = discordEnabledJS ? '#5865F2' : '#555';
+                            thumb.style.transform = discordEnabledJS ? 'translateX(20px)' : 'translateX(0)';
+                            if (typeof AndroidBridge !== 'undefined') AndroidBridge.setDiscordEnabled(discordEnabledJS);
+                        });
+                        return el;
+                    };
+                    section.appendChild(buildToggleEl());
+                    const reinjector = new MutationObserver(() => {
+                        if (!section.querySelector('#__discord-toggle-item')) section.appendChild(buildToggleEl());
+                    });
+                    reinjector.observe(section, { childList: true });
+                    panel._discordReinjector = reinjector;
+                };
+
+                const watchForJumpPanel = () => {
+                    const panel = document.querySelector('#jump-panel');
+                    if (panel) { injectDiscordToggle(panel); watchForJumpPanelRemoval(panel); return; }
+                    const jpObserver = new MutationObserver(() => {
+                        const p = document.querySelector('#jump-panel');
+                        if (p) { jpObserver.disconnect(); injectDiscordToggle(p); watchForJumpPanelRemoval(p); }
+                    });
+                    jpObserver.observe(document.body, { childList: true, subtree: true });
+                };
+                const watchForJumpPanelRemoval = (panel) => {
+                    const parent = panel.parentNode;
+                    if (!parent) return;
+                    const removalObserver = new MutationObserver(() => {
+                        if (!parent.contains(panel)) {
+                            removalObserver.disconnect();
+                            if (panel._discordReinjector) { panel._discordReinjector.disconnect(); panel._discordReinjector = null; }
+                            watchForJumpPanel();
+                        }
+                    });
+                    removalObserver.observe(parent, { childList: true });
+                };
+                watchForJumpPanel();
 
                 startWatching();
                 const video = document.querySelector('video');
