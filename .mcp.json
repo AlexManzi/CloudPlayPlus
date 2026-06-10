@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "code-review-graph": {
+      "command": "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13",
+      "args": [
+        "-m",
+        "code_review_graph",
+        "serve"
+      ],
+      "cwd": "/Users/amanzi/AndroidStudioProjects/GxCloud",
+      "type": "stdio"
+    }
+  }
+}
