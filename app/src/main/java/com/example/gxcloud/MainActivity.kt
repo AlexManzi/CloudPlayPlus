@@ -356,8 +356,8 @@ class MainActivity : AppCompatActivity() {
                         return;
                     }
 
-                    const vert = '#version 300 es\nin vec4 position;\nuniform vec2 texelSize;\nout vec2 vUV;\nout vec2 vUVb;\nout vec2 vUVd;\nout vec2 vUVf;\nout vec2 vUVh;\nvoid main(){gl_Position=position;vUV=vec2(position.x*0.5+0.5,0.5-position.y*0.5);vUVb=vUV+vec2(0.0,texelSize.y);vUVd=vUV+vec2(-texelSize.x,0.0);vUVf=vUV+vec2(texelSize.x,0.0);vUVh=vUV+vec2(0.0,-texelSize.y);}';
-                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nin vec2 vUV;\nin vec2 vUVb;\nin vec2 vUVd;\nin vec2 vUVf;\nin vec2 vUVh;\nconst float sharpenFactor=0.35;\nout vec4 fragColor;\nvoid main(){\n  vec3 e=texture(data,vUV).rgb;\n  vec3 b=texture(data,vUVb).rgb;\n  vec3 d=texture(data,vUVd).rgb;\n  vec3 f=texture(data,vUVf).rgb;\n  vec3 h=texture(data,vUVh).rgb;\n  const vec3 lw=vec3(0.2126,0.7152,0.0722);\n  float le=dot(e,lw);float lb=dot(b,lw);float ld=dot(d,lw);float lf=dot(f,lw);float lh=dot(h,lw);\n  float mn_l=min(min(min(ld,le),min(lf,lb)),lh);\n  float mx_l=max(max(max(ld,le),max(lf,lb)),lh);\n  float amp=mn_l/(mx_l+0.01);\n  float wm=clamp((le-0.05)*2.2222,0.0,1.0);\n  float cg=clamp((mx_l-mn_l-0.005)*28.57,0.0,1.0);\n  float w=-(wm*cg)*(amp*0.2);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 o=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0);\n  vec3 det=o-e;\n  vec3 lim=det/(1.0+abs(det)*4.0);\n  vec3 s=e+lim*sharpenFactor;\n  float satBoost=1.0+wm*0.16;\n  fragColor=vec4(clamp(mix(vec3(le),s,satBoost),0.0,1.0),1.0);\n}';
+                    const vert = '#version 300 es\nin vec4 position;\nout vec2 vUV;\nvoid main(){gl_Position=position;vUV=vec2(position.x*0.5+0.5,0.5-position.y*0.5);}';
+                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nin vec2 vUV;\nconst float sharpenFactor=0.35;\nout vec4 fragColor;\nvoid main(){\n  vec3 e=texture(data,vUV).rgb;\n  vec3 b=textureOffset(data,vUV,ivec2(0,1)).rgb;\n  vec3 d=textureOffset(data,vUV,ivec2(-1,0)).rgb;\n  vec3 f=textureOffset(data,vUV,ivec2(1,0)).rgb;\n  vec3 h=textureOffset(data,vUV,ivec2(0,-1)).rgb;\n  const vec3 lw=vec3(0.2126,0.7152,0.0722);\n  float le=dot(e,lw);float lb=dot(b,lw);float ld=dot(d,lw);float lf=dot(f,lw);float lh=dot(h,lw);\n  float mn_l=min(min(min(ld,le),min(lf,lb)),lh);\n  float mx_l=max(max(max(ld,le),max(lf,lb)),lh);\n  float amp=mn_l/(mx_l+0.01);\n  float wm=clamp((le-0.05)*2.2222,0.0,1.0);\n  float cg=clamp((mx_l-mn_l-0.005)*28.57,0.0,1.0);\n  float w=-(wm*cg)*(amp*0.2);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 det=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0)-e;\n  vec3 s=e+det/(1.0+abs(det)*4.0)*sharpenFactor;\n  float satBoost=1.0+wm*0.18;\n  fragColor=vec4(clamp(mix(vec3(le),s,satBoost),0.0,1.0),1.0);\n}';
 
                     const mkShader = (type, src) => {
                         const s = gl.createShader(type);
@@ -413,8 +413,6 @@ class MainActivity : AppCompatActivity() {
                     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, EMPTY_PIXEL);
                     gl.activeTexture(gl.TEXTURE0);
                     gl.uniform1i(gl.getUniformLocation(prog, 'data'), 0);
-                    const texelSizeLoc = gl.getUniformLocation(prog, 'texelSize');
-
                     let syncTimer = null;
                     const syncSize = () => { clearTimeout(syncTimer); syncTimer = setTimeout(_syncSize, 16); };
                     const _syncSize = () => {
@@ -427,7 +425,6 @@ class MainActivity : AppCompatActivity() {
                         canvas.width = bridge.width = w;
                         canvas.height = bridge.height = h;
                         gl.viewport(0, 0, w, h);
-                        gl.uniform2f(texelSizeLoc, 1.0/w, 1.0/h);
                     };
                     _syncSize();
 
@@ -540,7 +537,7 @@ class MainActivity : AppCompatActivity() {
                             poll = setInterval(() => {
                                 const toggle = document.querySelector('button[aria-label="Quick actions toggle" i]');
                                 if (toggle) { clearInterval(poll); poll = null; hideMenuButton(); }
-                            }, 7000);
+                            }, 12000);
                         }
                     }, 10000);
                     setupWebGLCAS(video);
