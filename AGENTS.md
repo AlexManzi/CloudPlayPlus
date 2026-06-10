@@ -105,12 +105,15 @@ Two variants were tried and both rejected:
 
 ### Vertex shader
 
-Neighbor UVs (vUVb, vUVd, vUVf, vUVh) are precomputed in the vertex shader and passed as varyings. `texelSize` uniform lives in the vertex shader. With the oversized triangle trick, vertex shader runs 3 times per frame; the 4 UV additions run 3 times instead of ~2M times.
+Vertex shader only computes `vUV` from `position`. No `texelSize` uniform, no neighbor UV varyings.
 
-`texelSize` is set once at init and updated only on resolution change (inside the canvas size guard). It is **not** set per frame.
+Previously, neighbor UVs (vUVb/d/f/h) were computed in the vertex shader to shift 4 additions from per-pixel to 3 per frame. That required a `texelSize` uniform updated on every resize. Replaced with `textureOffset` in the fragment shader — the GLSL compiler folds constant `ivec2` offsets into the sampler at compile time (zero runtime ALU cost), so the per-pixel arithmetic difference is gone. Eliminates 4 varyings and the uniform, reducing interpolator bandwidth and the resize codepath.
+
+**Do not reintroduce `texelSize` or neighbor UV varyings.**
 
 ### Fragment shader
 
+- **`textureOffset(data, vUV, ivec2(...))`** — constant-offset variant; GLSL ES 3.0 core. Compiler folds the offset into the texture fetch. Equivalent cost to a plain `texture()` call. Offsets ±1 are well within `gl_MinProgramTexelOffset`/`gl_MaxProgramTexelOffset` range.
 - **`precision mediump float`** — Adreno 618 runs mediump on FP16 ALUs (~2× throughput vs highp). Do not change to highp.
 - **`const vec3 lw`** — compile-time constant enables driver constant folding on all `dot(x, lw)` calls. Do not make it a uniform.
 - **`const float sharpenFactor`** — compile-time constant, no uniform lookup needed
@@ -202,6 +205,7 @@ Discord Web requires `domStorage`, media permissions, and a desktop user-agent. 
 - **`overscrollBehavior = 'none'`** — prevents pull-to-refresh and overscroll effects
 - WebGL canvas is already on its own GPU compositor layer by definition. `translateZ(0)` and `will-change: transform` are no-ops on WebGL canvases.
 - `video.style.willChange = 'transform'` — pointless on a hidden video, would just waste a compositor layer
+- **Injected CSS uses universal `*` selector** — `* { -webkit-tap-highlight-color: transparent !important; outline: none !important; }` must target all elements. Narrowing to `video,canvas` causes the Discord toggle to stop appearing in the Xbox guide panel (exact mechanism unclear, likely xCloud's guide CSS interacting with missing `outline: none` on section/container elements). **Do not narrow this selector.**
 
 ---
 
@@ -216,6 +220,7 @@ Discord Web requires `domStorage`, media permissions, and a desktop user-agent. 
 | rAF + rVFC hybrid | Current approach, confirmed better |
 | `document.body { subtree:true }` for jump panel removal | Sustained CPU drain during streaming — narrowed to `panel.parentNode` |
 | NEAREST vs LINEAR filtering | NEAREST confirmed no quality loss at native res, less texture unit work |
+| `textureOffset` vs neighbor UV varyings | Same visual output, fewer varyings, no texelSize uniform — current approach |
 | preferMinimalPostProcessing | Real battery saving |
 | 60Hz display pin | Real battery saving |
 
