@@ -14,4 +14,10 @@
         android:layout_height="match_parent"
         android:layout="@layout/layout_discord" />
 
+    <ViewStub
+        android:id="@+id/notesStub"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout="@layout/layout_notes" />
+
 </FrameLayout>
