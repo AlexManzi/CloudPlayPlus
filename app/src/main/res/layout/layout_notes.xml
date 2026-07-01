@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/notesContainer"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#B3000000"
+    android:clickable="true"
+    android:focusable="true">
+
+    <LinearLayout
+        android:layout_width="760dp"
+        android:layout_height="420dp"
+        android:layout_gravity="center"
+        android:orientation="horizontal"
+        android:background="#1E1E1E"
+        android:elevation="12dp">
+
+        <!-- Sidebar: note list -->
+        <LinearLayout
+            android:layout_width="200dp"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:background="#161616">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:text="Notes"
+                android:textColor="#FFFFFF"
+                android:textSize="18sp"
+                android:gravity="center_vertical"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp" />
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="#333333" />
+
+            <ScrollView
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:scrollbars="none">
+
+                <LinearLayout
+                    android:id="@+id/notesListContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+
+            </ScrollView>
+
+            <Button
+                android:id="@+id/notesNewBtn"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:text="+ New"
+                android:textColor="#FFFFFF"
+                android:background="#2A2A2A"
+                android:stateListAnimator="@null" />
+
+        </LinearLayout>
+
+        <!-- Editor -->
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <EditText
+                    android:id="@+id/notesTitleEdit"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:hint="Title"
+                    android:textColor="#FFFFFF"
+                    android:textColorHint="#666666"
+                    android:background="@null"
+                    android:paddingStart="16dp"
+                    android:paddingEnd="8dp"
+                    android:textSize="17sp"
+                    android:singleLine="true"
+                    android:imeOptions="actionNext"
+                    android:inputType="text" />
+
+                <Button
+                    android:id="@+id/notesDeleteBtn"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Delete"
+                    android:textColor="#FF6B6B"
+                    android:background="@null"
+                    android:paddingEnd="8dp"
+                    android:stateListAnimator="@null" />
+
+                <Button
+                    android:id="@+id/notesCloseBtn"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:text="✕"
+                    android:textColor="#FFFFFF"
+                    android:textSize="18sp"
+                    android:background="@null"
+                    android:stateListAnimator="@null" />
+
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="#333333" />
+
+            <EditText
+                android:id="@+id/notesBodyEdit"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:hint="Start typing…"
+                android:textColor="#FFFFFF"
+                android:textColorHint="#666666"
+                android:background="@null"
+                android:padding="16dp"
+                android:textSize="15sp"
+                android:gravity="top"
+                android:inputType="textMultiLine"
+                android:scrollbars="vertical" />
+
+        </LinearLayout>
+
+    </LinearLayout>
+
+</FrameLayout>
