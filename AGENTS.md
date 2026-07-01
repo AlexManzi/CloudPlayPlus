@@ -214,6 +214,7 @@ Discord Web requires `domStorage`, media permissions, and a desktop user-agent. 
 | Change | Result |
 |--------|--------|
 | VideoFrame + texSubImage2D | Smooth but higher battery than bridge — rejected |
+| Direct upload: `gl.texImage2D(…, video)` (no bridge canvas) | 4%/15min vs ~3.25% bridge baseline (~23% worse) — rejected. Consistent with external-OES resolve theory: VideoFrame source is GL_TEXTURE_EXTERNAL_OES; resolving to sampler2D adds a CPU staging path. Bridge canvas avoids this entirely. |
 | Bridge canvas + texImage2D | Best battery — current approach |
 | Bridge canvas + texSubImage2D | Higher battery than texImage2D (pipeline barrier stalls) — rejected |
 | Pure rVFC drives RAF (no continuous loop) | ~60% battery increase vs baseline — rejected |
