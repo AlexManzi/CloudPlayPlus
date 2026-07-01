@@ -10,6 +10,9 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.Editable
+import android.text.TextWatcher
+import android.util.AtomicFile
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
@@ -21,12 +24,21 @@ import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Button
+import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.TextView
 import androidx.activity.addCallback
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.util.UUID
 import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
@@ -43,11 +55,31 @@ class MainActivity : AppCompatActivity() {
     private var discordEnabled = false
     private var tapCount = 0
     private val tapHandler = Handler(Looper.getMainLooper())
+    private val jumpPanelProbeHandler = Handler(Looper.getMainLooper())
     private val viewLocation = IntArray(2)
+
+    // Notes state
+    private lateinit var notesStub: ViewStub
+    private var notesContainer: FrameLayout? = null
+    private var notesVisible = false
+    private val notesAutoSaveHandler = Handler(Looper.getMainLooper())
+    private var notesSaveRunnable: Runnable? = null
+    private val notesFile by lazy { AtomicFile(File(filesDir, "gxcloud_notes.json")) }
+    private val notesList = mutableListOf<Note>()
+    private var selectedNoteId: String? = null
+    private var notesLoaded = false
+
+    data class Note(val id: String, var title: String, var body: String, var updatedAt: Long)
+
     inner class StreamBridge {
         @JavascriptInterface
         fun setDiscordEnabled(enabled: Boolean) {
             discordEnabled = enabled
+        }
+
+        @JavascriptInterface
+        fun openNotes() {
+            runOnUiThread { showNotes() }
         }
     }
 
@@ -145,6 +177,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         discordStub = findViewById(R.id.discordStub)
+        notesStub = findViewById(R.id.notesStub)
 
         setupBackHandler()
         webView.loadUrl("https://play.xbox.com/")
@@ -161,6 +194,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        if (notesVisible) forceNoteSave()
         webView.onPause()
         webView.pauseTimers()
         webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_WAIVED, true)
@@ -288,9 +322,199 @@ class MainActivity : AppCompatActivity() {
         discordState = DiscordState.CLOSED
     }
 
+    // ── Notes ────────────────────────────────────────────────────────────────
+
+    private fun inflateNotes(): FrameLayout {
+        val root = notesStub.inflate() as FrameLayout
+        notesContainer = root
+
+        val listContainer = root.findViewById<LinearLayout>(R.id.notesListContainer)
+        val titleEdit = root.findViewById<EditText>(R.id.notesTitleEdit)
+        val bodyEdit = root.findViewById<EditText>(R.id.notesBodyEdit)
+        val newBtn = root.findViewById<Button>(R.id.notesNewBtn)
+        val deleteBtn = root.findViewById<Button>(R.id.notesDeleteBtn)
+        val closeBtn = root.findViewById<Button>(R.id.notesCloseBtn)
+
+        closeBtn.setOnClickListener { hideNotes() }
+
+        newBtn.setOnClickListener {
+            forceNoteSave()
+            val note = Note(UUID.randomUUID().toString(), "", "", System.currentTimeMillis())
+            notesList.add(0, note)
+            saveNotes()
+            selectNote(note.id, listContainer, titleEdit, bodyEdit)
+        }
+
+        deleteBtn.setOnClickListener {
+            val id = selectedNoteId ?: return@setOnClickListener
+            AlertDialog.Builder(this)
+                .setMessage("Delete this note?")
+                .setPositiveButton("Delete") { _, _ ->
+                    notesList.removeAll { it.id == id }
+                    if (notesList.isEmpty()) {
+                        notesList.add(Note(UUID.randomUUID().toString(), "", "", System.currentTimeMillis()))
+                    }
+                    saveNotes()
+                    selectNote(notesList[0].id, listContainer, titleEdit, bodyEdit)
+                    rebuildNotesList(listContainer, titleEdit, bodyEdit)
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+
+        val autoSave = {
+            val id = selectedNoteId
+            if (id != null) {
+                notesList.find { it.id == id }?.let {
+                    it.title = titleEdit.text.toString()
+                    it.body = bodyEdit.text.toString()
+                    it.updatedAt = System.currentTimeMillis()
+                }
+                scheduleNoteSave()
+            }
+        }
+
+        titleEdit.addTextChangedListener(object : TextWatcher {
+            override fun afterTextChanged(s: Editable?) = autoSave()
+            override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
+            override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+        })
+        bodyEdit.addTextChangedListener(object : TextWatcher {
+            override fun afterTextChanged(s: Editable?) = autoSave()
+            override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
+            override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+        })
+
+        return root
+    }
+
+    private fun showNotes() {
+        if (notesContainer == null) inflateNotes()
+        if (!notesLoaded) {
+            notesList.clear()
+            notesList.addAll(loadNotes())
+            if (notesList.isEmpty()) notesList.add(Note(UUID.randomUUID().toString(), "", "", System.currentTimeMillis()))
+            notesLoaded = true
+        }
+        val root = notesContainer!!
+        val listContainer = root.findViewById<LinearLayout>(R.id.notesListContainer)
+        val titleEdit = root.findViewById<EditText>(R.id.notesTitleEdit)
+        val bodyEdit = root.findViewById<EditText>(R.id.notesBodyEdit)
+        rebuildNotesList(listContainer, titleEdit, bodyEdit)
+        if (selectedNoteId == null || notesList.none { it.id == selectedNoteId }) {
+            selectedNoteId = notesList[0].id
+        }
+        loadNoteIntoEditor(selectedNoteId!!, titleEdit, bodyEdit)
+        notesContainer!!.visibility = View.VISIBLE
+        notesVisible = true
+    }
+
+    private fun hideNotes() {
+        forceNoteSave()
+        notesContainer?.visibility = View.GONE
+        notesVisible = false
+    }
+
+    private fun selectNote(id: String, listContainer: LinearLayout, titleEdit: EditText, bodyEdit: EditText) {
+        selectedNoteId = id
+        loadNoteIntoEditor(id, titleEdit, bodyEdit)
+        rebuildNotesList(listContainer, titleEdit, bodyEdit)
+    }
+
+    private fun loadNoteIntoEditor(id: String, titleEdit: EditText, bodyEdit: EditText) {
+        val note = notesList.find { it.id == id } ?: return
+        titleEdit.setText(note.title)
+        bodyEdit.setText(note.body)
+        titleEdit.setSelection(note.title.length)
+    }
+
+    @SuppressLint("SetTextI18n")
+    private fun rebuildNotesList(listContainer: LinearLayout, titleEdit: EditText, bodyEdit: EditText) {
+        listContainer.removeAllViews()
+        notesList.forEach { note ->
+            val row = TextView(this).apply {
+                text = note.title.ifEmpty { "Untitled" }
+                setTextColor(if (note.id == selectedNoteId) 0xFFFFFFFF.toInt() else 0xFF999999.toInt())
+                setBackgroundColor(if (note.id == selectedNoteId) 0xFF2A2A2A.toInt() else 0x00000000)
+                setPadding(40, 28, 40, 28)
+                textSize = 14f
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setOnClickListener {
+                    forceNoteSave()
+                    selectNote(note.id, listContainer, titleEdit, bodyEdit)
+                }
+            }
+            listContainer.addView(row)
+        }
+    }
+
+    private fun scheduleNoteSave() {
+        notesSaveRunnable?.let { notesAutoSaveHandler.removeCallbacks(it) }
+        val r = Runnable { saveNotes() }
+        notesSaveRunnable = r
+        notesAutoSaveHandler.postDelayed(r, 600)
+    }
+
+    private fun forceNoteSave() {
+        notesSaveRunnable?.let { notesAutoSaveHandler.removeCallbacks(it) }
+        notesSaveRunnable = null
+        saveNotes()
+    }
+
+    private fun loadNotes(): List<Note> {
+        return try {
+            val bytes = notesFile.readFully()
+            val arr = JSONArray(String(bytes))
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                Note(o.getString("id"), o.getString("title"), o.getString("body"), o.getLong("updatedAt"))
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun saveNotes() {
+        if (!notesLoaded) return
+        try {
+            val arr = JSONArray()
+            notesList.forEach { note ->
+                arr.put(JSONObject().apply {
+                    put("id", note.id)
+                    put("title", note.title)
+                    put("body", note.body)
+                    put("updatedAt", note.updatedAt)
+                })
+            }
+            val stream = notesFile.startWrite()
+            try {
+                stream.write(arr.toString().toByteArray())
+                notesFile.finishWrite(stream)
+            } catch (e: Exception) {
+                notesFile.failWrite(stream)
+                throw e
+            }
+        } catch (_: Exception) {}
+    }
+
+    // ── Input ────────────────────────────────────────────────────────────────
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.keyCode == KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
-        return webView.dispatchKeyEvent(event) || super.dispatchKeyEvent(event)
+        val result = webView.dispatchKeyEvent(event) || super.dispatchKeyEvent(event)
+        if (event.action == KeyEvent.ACTION_UP) {
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_BUTTON_MODE,
+                KeyEvent.KEYCODE_MENU,
+                KeyEvent.KEYCODE_BUTTON_START -> {
+                    for (delay in longArrayOf(100, 250, 450)) {
+                        jumpPanelProbeHandler.postDelayed({ webView.evaluateJavascript("window.__gxcloudProbeJumpPanel&&window.__gxcloudProbeJumpPanel();", null) }, delay)
+                    }
+                }
+            }
+        }
+        return result
     }
 
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
@@ -299,8 +523,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupBackHandler() {
         onBackPressedDispatcher.addCallback(this) {
-            if (webView.canGoBack()) {
-                webView.goBack()
+            when {
+                notesVisible -> hideNotes()
+                webView.canGoBack() -> webView.goBack()
             }
         }
     }
@@ -346,7 +571,8 @@ class MainActivity : AppCompatActivity() {
                     video.dataset.casSetup = 'true';
 
                     const canvas = document.createElement('canvas');
-                    video.parentNode.insertBefore(canvas, video);
+                    canvas.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;pointer-events:none;contain:strict;';
+                    document.body.appendChild(canvas);
                     video.style.visibility = 'hidden';
 
                     const gl = canvas.getContext('webgl2', { powerPreference: 'low-power', alpha: false, depth: false, stencil: false, preserveDrawingBuffer: false, antialias: false, desynchronized: true, premultipliedAlpha: false });
@@ -357,7 +583,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     const vert = '#version 300 es\nin vec4 position;\nout vec2 vUV;\nvoid main(){gl_Position=position;vUV=vec2(position.x*0.5+0.5,0.5-position.y*0.5);}';
-                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nin vec2 vUV;\nconst float sharpenFactor=0.35;\nout vec4 fragColor;\nvoid main(){\n  vec3 e=texture(data,vUV).rgb;\n  vec3 b=textureOffset(data,vUV,ivec2(0,1)).rgb;\n  vec3 d=textureOffset(data,vUV,ivec2(-1,0)).rgb;\n  vec3 f=textureOffset(data,vUV,ivec2(1,0)).rgb;\n  vec3 h=textureOffset(data,vUV,ivec2(0,-1)).rgb;\n  const vec3 lw=vec3(0.2126,0.7152,0.0722);\n  float le=dot(e,lw);float lb=dot(b,lw);float ld=dot(d,lw);float lf=dot(f,lw);float lh=dot(h,lw);\n  float mn_l=min(min(min(ld,le),min(lf,lb)),lh);\n  float mx_l=max(max(max(ld,le),max(lf,lb)),lh);\n  float amp=mn_l/(mx_l+0.01);\n  float wm=clamp((le-0.05)*2.2222,0.0,1.0);\n  float cg=clamp((mx_l-mn_l-0.005)*28.57,0.0,1.0);\n  float w=-(wm*cg)*(amp*0.2);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 det=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0)-e;\n  vec3 s=e+det/(1.0+abs(det)*4.0)*sharpenFactor;\n  float satBoost=1.0+wm*0.18;\n  fragColor=vec4(clamp(mix(vec3(le),s,satBoost),0.0,1.0),1.0);\n}';
+                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nin vec2 vUV;\nconst float sharpenFactor=0.36;\nout vec4 fragColor;\nvoid main(){\n  vec3 e=texture(data,vUV).rgb;\n  vec3 b=textureOffset(data,vUV,ivec2(0,1)).rgb;\n  vec3 d=textureOffset(data,vUV,ivec2(-1,0)).rgb;\n  vec3 f=textureOffset(data,vUV,ivec2(1,0)).rgb;\n  vec3 h=textureOffset(data,vUV,ivec2(0,-1)).rgb;\n  const vec3 lw=vec3(0.2126,0.7152,0.0722);\n  float le=dot(e,lw);float lb=dot(b,lw);float ld=dot(d,lw);float lf=dot(f,lw);float lh=dot(h,lw);\n  float mn_l=min(min(min(ld,le),min(lf,lb)),lh);\n  float mx_l=max(max(max(ld,le),max(lf,lb)),lh);\n  float amp=mn_l/(mx_l+0.01);\n  float wm=clamp((le-0.05)*2.2222,0.0,1.0);\n  float cg=clamp((mx_l-mn_l-0.005)*28.57,0.0,1.0);\n  float w=-(wm*cg)*(amp*0.2);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 det=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0)-e;\n  vec3 s=e+det/(1.0+abs(det)*4.0)*sharpenFactor;\n  float satBoost=1.0+wm*0.18;\n  fragColor=vec4(clamp(mix(vec3(le),s,satBoost),0.0,1.0),1.0);\n}';
 
                     const mkShader = (type, src) => {
                         const s = gl.createShader(type);
@@ -419,8 +645,6 @@ class MainActivity : AppCompatActivity() {
                         if (!video.videoWidth || !video.videoHeight) return;
                         const w = video.videoWidth;
                         const h = video.videoHeight;
-                        const r = video.getBoundingClientRect();
-                        canvas.style.cssText = 'position:static;contain:strict;width:' + Math.round(r.width) + 'px;height:' + Math.round(r.height) + 'px;pointer-events:none;';
                         if (canvas.width === w && canvas.height === h) return;
                         canvas.width = bridge.width = w;
                         canvas.height = bridge.height = h;
@@ -430,9 +654,6 @@ class MainActivity : AppCompatActivity() {
 
                     video.addEventListener('loadedmetadata', _syncSize);
                     video.addEventListener('resize', syncSize);
-
-                    const ro = new ResizeObserver(syncSize);
-                    ro.observe(video);
 
                     let frameHandle = null;
                     let vfcHandle = null;
@@ -483,7 +704,6 @@ class MainActivity : AppCompatActivity() {
                         video.removeEventListener('pause', cancelFrame);
                         video.removeEventListener('play', scheduleFrame);
                         document.removeEventListener('visibilitychange', onVisibility);
-                        ro.disconnect();
                         clearTimeout(syncTimer);
                         video.removeEventListener('loadedmetadata', _syncSize);
                         video.removeEventListener('resize', syncSize);
@@ -503,7 +723,6 @@ class MainActivity : AppCompatActivity() {
                         clearTimeout(syncTimer);
                         video.removeEventListener('loadedmetadata', _syncSize);
                         video.removeEventListener('resize', syncSize);
-                        ro.disconnect();
                         canvas.remove();
                         bridge.width = 1; bridge.height = 1;
                         gl.getExtension('WEBGL_lose_context')?.loseContext();
@@ -537,7 +756,7 @@ class MainActivity : AppCompatActivity() {
                             poll = setInterval(() => {
                                 const toggle = document.querySelector('button[aria-label="Quick actions toggle" i]');
                                 if (toggle) { clearInterval(poll); poll = null; hideMenuButton(); }
-                            }, 12000);
+                            }, 20000);
                         }
                     }, 10000);
                     setupWebGLCAS(video);
@@ -586,6 +805,18 @@ class MainActivity : AppCompatActivity() {
                         return;
                     }
                     panel.dataset.discordInjected = 'true';
+
+                    const buildNotesEl = () => {
+                        const el = document.createElement('div');
+                        el.id = '__notes-item';
+                        el.style.cssText = 'display:flex;align-items:center;min-height:52px;padding:0 16px;gap:12px;cursor:pointer;';
+                        el.innerHTML = '<svg style="width:20px;height:20px;flex-shrink:0;fill:#fff;" viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg><span style="flex:1;color:#fff;font-size:14px;">Notes</span>';
+                        el.addEventListener('click', () => {
+                            if (typeof AndroidBridge !== 'undefined') AndroidBridge.openNotes();
+                        });
+                        return el;
+                    };
+
                     const buildToggleEl = () => {
                         const el = document.createElement('div');
                         el.id = '__discord-toggle-item';
@@ -603,22 +834,24 @@ class MainActivity : AppCompatActivity() {
                         });
                         return el;
                     };
+
+                    section.appendChild(buildNotesEl());
                     section.appendChild(buildToggleEl());
+
                     const reinjector = new MutationObserver(() => {
+                        if (!section.querySelector('#__notes-item')) section.insertBefore(buildNotesEl(), section.querySelector('#__discord-toggle-item') || null);
                         if (!section.querySelector('#__discord-toggle-item')) section.appendChild(buildToggleEl());
                     });
                     reinjector.observe(section, { childList: true });
                     panel._discordReinjector = reinjector;
                 };
 
-                const watchForJumpPanel = () => {
-                    const panel = document.querySelector('#jump-panel');
-                    if (panel) { injectDiscordToggle(panel); watchForJumpPanelRemoval(panel); return; }
-                    const jpObserver = new MutationObserver(() => {
-                        const p = document.querySelector('#jump-panel');
-                        if (p) { jpObserver.disconnect(); injectDiscordToggle(p); watchForJumpPanelRemoval(p); }
-                    });
-                    jpObserver.observe(document.body, { childList: true, subtree: true });
+                window.__gxcloudProbeJumpPanel = () => {
+                    // const panel = document.getElementById('jump-panel');
+                    const panel = document.getElementById('guide-tabpanel-jump');
+                    if (!panel || panel.dataset.discordInjected) return;
+                    injectDiscordToggle(panel);
+                    watchForJumpPanelRemoval(panel);
                 };
                 const watchForJumpPanelRemoval = (panel) => {
                     const parent = panel.parentNode;
@@ -627,13 +860,11 @@ class MainActivity : AppCompatActivity() {
                         if (!parent.contains(panel)) {
                             removalObserver.disconnect();
                             if (panel._discordReinjector) { panel._discordReinjector.disconnect(); panel._discordReinjector = null; }
-                            watchForJumpPanel();
+                            delete panel.dataset.discordInjected;
                         }
                     });
                     removalObserver.observe(parent, { childList: true });
                 };
-                watchForJumpPanel();
-
                 startWatching();
                 const video = document.querySelector('video');
                 if (video) {
