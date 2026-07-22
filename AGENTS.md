@@ -118,7 +118,7 @@ Previously, neighbor UVs (vUVb/d/f/h) were computed in the vertex shader to shif
 - **`const vec3 lw`** — compile-time constant enables driver constant folding on all `dot(x, lw)` calls. Do not make it a uniform.
 - **`const float sharpenFactor`** — compile-time constant, no uniform lookup needed
 - **No `sqrt` in `amp`** — removed. `amp = mn_l / (mx_l + 0.01)` is the simplified form, already optimal (3 GPU ops: add, RCP, mul)
-- **Saturation boost** (`wm * 0.16`) — intentional, user wants this visual style. Do not remove.
+- **Saturation boost** (`wm * 0.18`) — intentional, user wants this visual style. Do not remove.
 - **`mix(vec3(le), s, satBoost)`** — maps to a single hardware LRP instruction. Do not replace with expanded form (`le + (s-le)*satBoost`) which is 3 instructions.
 - **5-tap cross pattern** — minimum for isotropic sharpening. Dropping to 4 taps requires an asymmetric or diagonal pattern with visible quality loss on game content. Do not reduce.
 
@@ -143,8 +143,10 @@ bridgeCtx.globalCompositeOperation = 'copy';
 - **`willReadFrequently: false`** — we never call `getImageData`, so no CPU-readback hint needed
 - **`imageSmoothingEnabled = false`** — no interpolation during drawImage
 - **`globalCompositeOperation = 'copy'`** — skips alpha blend, overwrites pixels directly (default 'source-over' blends unnecessarily)
+- **Reapply `imageSmoothingEnabled`/`globalCompositeOperation` after ANY `bridge.width`/`bridge.height` assignment** — per HTML spec, setting a canvas's dimensions resets its 2D context to default state. `_syncSize` reapplies both after resizing. Before this fix (2026-07-02) the settings were wiped before the first frame and 'copy' was never active in production; the ~3.25%/15min battery baseline was measured with default 'source-over'. Not yet re-measured with 'copy' active.
 - **`desynchronized: true` on bridge** — irrelevant, bridge canvas is off-screen and never composited. Do not add.
 - Bridge canvas lives at IIFE scope (not inside `setupWebGLCAS`) — reused across context loss/restore events without reallocating
+- **`webglcontextlost` restores `video.style.visibility = ''`** — the handler calls `preventDefault()` but nothing guarantees `webglcontextrestored` ever fires (e.g. GPU process crash). Without this, the video stays hidden and the screen is permanently black. Worst case must degrade to unfiltered video, not black. Do not remove.
 
 ---
 
@@ -234,3 +236,4 @@ Discord Web requires `domStorage`, media permissions, and a desktop user-agent. 
 - **`android:launchMode="singleTask"`** — single instance
 - **`android:hardwareAccelerated="true"`** — default for API 14+, explicit for clarity
 - **`android:largeHeap` removed** — WebView is a separate process, largeHeap had no effect
+- **`android:appCategory="game"`** — **unmeasured, added on theory (2026-07-17).** Correct declaration either way (this is a game app), zero risk. Groups the app under Games in Settings battery/data/storage attribution, and is how the platform identifies games for Game Mode. Caveat: the Game Mode API is Android 12+ (API 31); if the G Cloud is on Android 11 that codepath doesn't exist and this attribute buys nothing beyond attribution grouping and whatever Logitech's own game detection does with it. Do not count this as a battery optimisation — no measurement backs it.
