@@ -3,6 +3,7 @@ package com.example.gxcloud
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.pm.PackageManager
+import android.os.BatteryManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
@@ -55,7 +56,6 @@ class MainActivity : AppCompatActivity() {
     private var discordEnabled = false
     private var tapCount = 0
     private val tapHandler = Handler(Looper.getMainLooper())
-    private val jumpPanelProbeHandler = Handler(Looper.getMainLooper())
     private val viewLocation = IntArray(2)
 
     // Notes state
@@ -80,6 +80,13 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun openNotes() {
             runOnUiThread { showNotes() }
+        }
+
+        @JavascriptInterface
+        fun getDeviceStatusJson(): String {
+            val bm = getSystemService(BATTERY_SERVICE) as BatteryManager
+            val pct = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+            return "{\"batteryPercent\":${if (pct in 0..100) pct else -1}}"
         }
     }
 
@@ -507,11 +514,8 @@ class MainActivity : AppCompatActivity() {
             when (event.keyCode) {
                 KeyEvent.KEYCODE_BUTTON_MODE,
                 KeyEvent.KEYCODE_MENU,
-                KeyEvent.KEYCODE_BUTTON_START -> {
-                    for (delay in longArrayOf(100, 250, 450)) {
-                        jumpPanelProbeHandler.postDelayed({ webView.evaluateJavascript("window.__gxcloudProbeJumpPanel&&window.__gxcloudProbeJumpPanel();", null) }, delay)
-                    }
-                }
+                KeyEvent.KEYCODE_BUTTON_START ->
+                    webView.evaluateJavascript("window.__gxcloudProbeJumpPanel&&window.__gxcloudProbeJumpPanel();", null)
             }
         }
         return result
@@ -583,7 +587,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     const vert = '#version 300 es\nin vec4 position;\nout vec2 vUV;\nvoid main(){gl_Position=position;vUV=vec2(position.x*0.5+0.5,0.5-position.y*0.5);}';
-                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nin vec2 vUV;\nconst float sharpenFactor=0.36;\nout vec4 fragColor;\nvoid main(){\n  vec3 e=texture(data,vUV).rgb;\n  vec3 b=textureOffset(data,vUV,ivec2(0,1)).rgb;\n  vec3 d=textureOffset(data,vUV,ivec2(-1,0)).rgb;\n  vec3 f=textureOffset(data,vUV,ivec2(1,0)).rgb;\n  vec3 h=textureOffset(data,vUV,ivec2(0,-1)).rgb;\n  const vec3 lw=vec3(0.2126,0.7152,0.0722);\n  float le=dot(e,lw);float lb=dot(b,lw);float ld=dot(d,lw);float lf=dot(f,lw);float lh=dot(h,lw);\n  float mn_l=min(min(min(ld,le),min(lf,lb)),lh);\n  float mx_l=max(max(max(ld,le),max(lf,lb)),lh);\n  float amp=mn_l/(mx_l+0.01);\n  float wm=clamp((le-0.05)*2.2222,0.0,1.0);\n  float cg=clamp((mx_l-mn_l-0.005)*28.57,0.0,1.0);\n  float w=-(wm*cg)*(amp*0.2);\n  float rw=1.0/(4.0*w+1.0);\n  vec3 det=clamp(((b+d+f+h)*w+e)*rw,0.0,1.0)-e;\n  vec3 s=e+det/(1.0+abs(det)*4.0)*sharpenFactor;\n  float satBoost=1.0+wm*0.18;\n  fragColor=vec4(clamp(mix(vec3(le),s,satBoost),0.0,1.0),1.0);\n}';
+                    const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nin vec2 vUV;\nconst float sharpenFactor=0.36;\nout vec4 fragColor;\nvoid main(){\n  vec3 e=texture(data,vUV).rgb;\n  vec3 b=textureOffset(data,vUV,ivec2(0,1)).rgb;\n  vec3 d=textureOffset(data,vUV,ivec2(-1,0)).rgb;\n  vec3 f=textureOffset(data,vUV,ivec2(1,0)).rgb;\n  vec3 h=textureOffset(data,vUV,ivec2(0,-1)).rgb;\n  const vec3 lw=vec3(0.2126,0.7152,0.0722);\n  float le=dot(e,lw);float lb=dot(b,lw);float ld=dot(d,lw);float lf=dot(f,lw);float lh=dot(h,lw);\n  float mn_l=min(min(min(ld,le),min(lf,lb)),lh);\n  float mx_l=max(max(max(ld,le),max(lf,lb)),lh);\n  float amp=mn_l/(mx_l+0.01);\n  float wm=clamp((le-0.05)*2.2222,0.0,1.0);\n  float cg=clamp((mx_l-mn_l-0.005)*28.57,0.0,1.0);\n  float w=-(wm*cg)*(amp*0.2);\n  float rw=1.0/(4.0*w+1.0);\n  float detL=clamp(((lb+ld+lf+lh)*w+le)*rw,0.0,1.0)-le;\n  float satBoost=1.0+wm*0.18;\n  float sharpL=le+detL/(1.0+abs(detL)*4.0)*sharpenFactor*satBoost;\n  fragColor=vec4(clamp(vec3(sharpL)+(e-vec3(le))*satBoost,0.0,1.0),1.0);\n}';
 
                     const mkShader = (type, src) => {
                         const s = gl.createShader(type);
@@ -648,6 +652,9 @@ class MainActivity : AppCompatActivity() {
                         if (canvas.width === w && canvas.height === h) return;
                         canvas.width = bridge.width = w;
                         canvas.height = bridge.height = h;
+                        // Resizing the bridge resets its 2D context to defaults — reapply
+                        bridgeCtx.imageSmoothingEnabled = false;
+                        bridgeCtx.globalCompositeOperation = 'copy';
                         gl.viewport(0, 0, w, h);
                     };
                     _syncSize();
@@ -708,6 +715,7 @@ class MainActivity : AppCompatActivity() {
                         video.removeEventListener('loadedmetadata', _syncSize);
                         video.removeEventListener('resize', syncSize);
                         canvas.remove();
+                        video.style.visibility = '';
                         delete video.dataset.casSetup;
                         delete video._casCleanup;
                     }, false);
@@ -838,6 +846,24 @@ class MainActivity : AppCompatActivity() {
                     section.appendChild(buildNotesEl());
                     section.appendChild(buildToggleEl());
 
+                    const buildStatusOverlay = () => {
+                        let pct = '--';
+                        try {
+                            if (typeof AndroidBridge !== 'undefined') {
+                                const s = JSON.parse(AndroidBridge.getDeviceStatusJson());
+                                if (s.batteryPercent >= 0) pct = s.batteryPercent;
+                            }
+                        } catch(e) {}
+                        const now = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }).format(new Date());
+                        const el = document.createElement('div');
+                        el.id = '__gxcloud-status-overlay';
+                        el.style.cssText = 'all:initial;position:fixed;top:5%;right:32px;pointer-events:none;display:flex;flex-direction:row;align-items:center;gap:10px;z-index:2147483647;';
+                        el.innerHTML = '<span style="all:initial;display:block;color:#fff;font-size:15px;font-weight:600;font-family:sans-serif;text-shadow:0 1px 4px rgba(0,0,0,.8);">' + pct + '%</span><span style="all:initial;display:block;color:#fff;font-size:15px;font-family:sans-serif;text-shadow:0 1px 4px rgba(0,0,0,.8);">' + now + '</span>';
+                        return el;
+                    };
+                    document.getElementById('__gxcloud-status-overlay')?.remove();
+                    document.documentElement.appendChild(buildStatusOverlay());
+
                     const reinjector = new MutationObserver(() => {
                         if (!section.querySelector('#__notes-item')) section.insertBefore(buildNotesEl(), section.querySelector('#__discord-toggle-item') || null);
                         if (!section.querySelector('#__discord-toggle-item')) section.appendChild(buildToggleEl());
@@ -846,24 +872,41 @@ class MainActivity : AppCompatActivity() {
                     panel._discordReinjector = reinjector;
                 };
 
-                window.__gxcloudProbeJumpPanel = () => {
+                let jumpWatchArmed = false;
+                const armJumpPanelWatch = () => {
                     // const panel = document.getElementById('jump-panel');
-                    const panel = document.getElementById('guide-tabpanel-jump');
-                    if (!panel || panel.dataset.discordInjected) return;
-                    injectDiscordToggle(panel);
-                    watchForJumpPanelRemoval(panel);
+                    const tryInject = () => {
+                        const panel = document.getElementById('guide-tabpanel-jump');
+                        if (panel && !panel.dataset.discordInjected) {
+                            injectDiscordToggle(panel);
+                            watchForJumpPanelRemoval(panel);
+                        }
+                        return !!panel;
+                    };
+                    // Warm case: panel already in the DOM — inject with zero observer cost.
+                    if (tryInject()) return;
+                    if (jumpWatchArmed) return;
+                    jumpWatchArmed = true;
+                    // Cold case: wait for the panel to render (arbitrary streaming lag),
+                    // then inject and disconnect. Bounded so it never runs continuously.
+                    let safety;
+                    const obs = new MutationObserver(() => {
+                        if (tryInject()) { obs.disconnect(); clearTimeout(safety); jumpWatchArmed = false; }
+                    });
+                    obs.observe(document.documentElement, { childList: true, subtree: true });
+                    safety = setTimeout(() => { obs.disconnect(); jumpWatchArmed = false; }, 3000);
                 };
+                window.__gxcloudProbeJumpPanel = armJumpPanelWatch;
                 const watchForJumpPanelRemoval = (panel) => {
-                    const parent = panel.parentNode;
-                    if (!parent) return;
-                    const removalObserver = new MutationObserver(() => {
-                        if (!parent.contains(panel)) {
-                            removalObserver.disconnect();
+                    const io = new IntersectionObserver((entries) => {
+                        if (!entries[0].isIntersecting) {
+                            io.disconnect();
                             if (panel._discordReinjector) { panel._discordReinjector.disconnect(); panel._discordReinjector = null; }
                             delete panel.dataset.discordInjected;
+                            document.getElementById('__gxcloud-status-overlay')?.remove();
                         }
-                    });
-                    removalObserver.observe(parent, { childList: true });
+                    }, { threshold: 0 });
+                    io.observe(panel);
                 };
                 startWatching();
                 const video = document.querySelector('video');
