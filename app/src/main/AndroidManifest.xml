@@ -17,6 +17,7 @@
         android:hardwareAccelerated="true"
         android:usesCleartextTraffic="false"
         android:resizeableActivity="false"
+        android:appCategory="game"
         >
         <activity
             android:name=".MainActivity"
