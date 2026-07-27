@@ -555,19 +555,29 @@ class MainActivity : AppCompatActivity() {
                 style.textContent = '* { -webkit-tap-highlight-color: transparent !important; outline: none !important; } button[aria-label="Exit preview"] { visibility: hidden !important; }';
                 document.head.appendChild(style);
 
+                // Returns true once the toggle is hidden (or was already hidden), so callers
+                // can stop retrying. Idempotent — cheap to call repeatedly.
                 const hideMenuButton = () => {
                     const toggle = document.querySelector('button[aria-label="Quick actions toggle" i]');
-                    if (toggle) {
-                        const container = toggle.closest('.absolute') ?? toggle.parentElement;
-                        if (container && !container.dataset.hidden) {
-                            container.dataset.hidden = 'true';
-                            container.style.visibility = 'hidden';
-                            container.addEventListener('mouseenter', () => container.style.visibility = 'visible');
-                            container.addEventListener('mouseleave', () => container.style.visibility = 'hidden');
-                            container.addEventListener('touchstart', () => container.style.visibility = 'visible');
-                            container.addEventListener('touchend', () => setTimeout(() => container.style.visibility = 'hidden', 1000));
-                        }
-                    }
+                    if (!toggle) return false;
+                    const container = toggle.closest('.absolute') ?? toggle.parentElement;
+                    if (!container) return false;
+                    if (container.dataset.hidden) return true;
+                    container.dataset.hidden = 'true';
+                    container.style.visibility = 'hidden';
+                    container.addEventListener('mouseenter', () => container.style.visibility = 'visible');
+                    container.addEventListener('mouseleave', () => container.style.visibility = 'hidden');
+                    container.addEventListener('touchstart', () => container.style.visibility = 'visible');
+                    container.addEventListener('touchend', () => setTimeout(() => container.style.visibility = 'hidden', 1000));
+                    return true;
+                };
+
+                // Full unbind: menu watch, CAS pipeline, and the binding marker, so the next
+                // stream can bind even if xCloud re-uses the same <video> element.
+                const teardown = (video) => {
+                    if (video._gxMenuCleanup) video._gxMenuCleanup();
+                    if (video._casCleanup) video._casCleanup();
+                    delete video.dataset.gxBound;
                 };
 
                 const setupWebGLCAS = (video) => {
@@ -664,12 +674,23 @@ class MainActivity : AppCompatActivity() {
 
                     let frameHandle = null;
                     let vfcHandle = null;
-                    let newFrame = false;
                     const hasRVFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
 
+                    const present = () => {
+                        if (video.readyState < 2 || video.paused || document.hidden) return;
+                        bridgeCtx.drawImage(video, 0, 0, bridge.width, bridge.height);
+                        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bridge);
+                        gl.drawArrays(gl.TRIANGLES, 0, 3);
+                    };
+
+                    // Draw the moment the frame is decoded. This used to set a flag that the
+                    // next rAF tick acted on, which cost up to a full vsync of latency before
+                    // the frame was even copied, and put the GPU work on the vsync critical
+                    // path. Draw count is unchanged — rVFC fires exactly once per decoded
+                    // frame, which is what the old flag gated on.
                     const onVFC = () => {
                         vfcHandle = null;
-                        newFrame = true;
+                        present();
                         if (!video.paused && !document.hidden)
                             vfcHandle = video.requestVideoFrameCallback(onVFC);
                     };
@@ -683,19 +704,24 @@ class MainActivity : AppCompatActivity() {
                     const cancelFrame = () => {
                         if (frameHandle !== null) { cancelAnimationFrame(frameHandle); frameHandle = null; }
                         if (vfcHandle !== null) { video.cancelVideoFrameCallback(vfcHandle); vfcHandle = null; }
-                        newFrame = false;
                     };
 
+                    // The rAF loop still spins every frame — it keeps the compositor and the
+                    // CPU governor warm, which is why it is unconditional — but rVFC now drives
+                    // the draw, so this is only the liveness ticker. It replaces the old
+                    // parent-scoped removal MutationObserver, and remains the draw driver on
+                    // the fallback path where rVFC is unavailable.
+                    let liveCheck = 0;
                     const render = () => {
                         frameHandle = null;
-                        if (video.readyState >= 2 && !video.paused && !document.hidden) {
-                            if (newFrame || !hasRVFC) {
-                                newFrame = false;
-                                bridgeCtx.drawImage(video, 0, 0, bridge.width, bridge.height);
-                                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bridge);
-                                gl.drawArrays(gl.TRIANGLES, 0, 3);
+                        if (++liveCheck >= 60) {
+                            liveCheck = 0;
+                            if (!video.srcObject || !document.contains(video)) {
+                                teardown(video);
+                                return;
                             }
                         }
+                        if (!hasRVFC) present();
                         scheduleFrame();
                     };
 
@@ -741,63 +767,87 @@ class MainActivity : AppCompatActivity() {
                 };
 
                 const foundVideo = (video) => {
-                    let menuFound = false;
-                    let poll = null;
-                    const menuObserver = new MutationObserver((mutations) => {
-                        if (!mutations.some(m => m.addedNodes.length > 0)) return;
-                        const toggle = document.querySelector('button[aria-label="Quick actions toggle" i]');
-                        if (toggle) {
-                            menuFound = true;
-                            clearTimeout(menuTimeout);
-                            hideMenuButton();
-                            const container = toggle.closest('.absolute');
-                            if (container?.parentNode) {
-                                menuObserver.disconnect();
-                                menuObserver.observe(container.parentNode, { childList: true });
-                            }
+                    if (video.dataset.gxBound) return;
+                    video.dataset.gxBound = 'true';
+
+                    // xCloud renders the quick-actions toggle in the same commit as the video,
+                    // so it is normally already in the DOM — check synchronously first. A
+                    // MutationObserver alone starves here: the stream page goes DOM-quiet once
+                    // playing, and only guide open/close churn would ever wake it.
+                    const retryDelays = [150, 400, 1000, 2500, 5000];
+                    let attempt = 0;
+                    let menuTimer = null;
+                    const menuObserver = new MutationObserver(() => { hideMenuButton(); });
+                    const tryHide = () => {
+                        menuTimer = null;
+                        if (hideMenuButton()) {
+                            // Landed. Keep a narrowly-scoped watch in case xCloud re-renders
+                            // the toggle and drops our dataset marker.
+                            const toggle = document.querySelector('button[aria-label="Quick actions toggle" i]');
+                            const container = toggle?.closest('.absolute');
+                            if (container?.parentNode) menuObserver.observe(container.parentNode, { childList: true });
+                            return;
                         }
-                    });
-                    menuObserver.observe(document.body, { childList: true, subtree: true });
-                    const menuTimeout = setTimeout(() => {
-                        if (!menuFound) {
-                            menuObserver.disconnect();
-                            poll = setInterval(() => {
-                                const toggle = document.querySelector('button[aria-label="Quick actions toggle" i]');
-                                if (toggle) { clearInterval(poll); poll = null; hideMenuButton(); }
-                            }, 20000);
-                        }
-                    }, 10000);
+                        if (attempt >= retryDelays.length) return;
+                        menuTimer = setTimeout(tryHide, retryDelays[attempt++]);
+                    };
+                    tryHide();
+
+                    video._gxMenuCleanup = () => {
+                        clearTimeout(menuTimer);
+                        menuTimer = null;
+                        attempt = retryDelays.length;
+                        menuObserver.disconnect();
+                        delete video._gxMenuCleanup;
+                    };
+
                     setupWebGLCAS(video);
-                    watchForVideoRemoval(video, menuObserver, () => { if (poll) { clearInterval(poll); poll = null; } });
                 };
 
-                const startWatching = () => {
-                    observer.observe(document.body, { childList: true, subtree: true });
+                // xCloud plays three different <video> elements over a session: the Xbox
+                // splash, a rocket loading animation, and the real stream. Binding to either
+                // of the first two is why CAS appeared not to activate. The stream is the one
+                // with no src (it is fed by srcObject) whose direct parent is the media
+                // container — the only stable anchor; the element carries no id.
+                const isStreamVideo = (v) => {
+                    if (!v || v.tagName !== 'VIDEO' || v.src) return false;
+                    const cls = typeof v.className === 'string' ? v.className : '';
+                    if (cls.startsWith('XboxSplashVideo') || cls.includes('RocketAnimationVideo')) return false;
+                    // Preferred anchor; fall back to srcObject alone so an upstream markup
+                    // change degrades instead of never binding at all.
+                    return v.parentElement?.dataset.testid === 'media-container' || !!v.srcObject;
                 };
 
-                const watchForVideoRemoval = (video, menuObserver, onCleanup) => {
-                    const parent = video.parentNode;
-                    if (!parent) return;
-                    const removalObserver = new MutationObserver(() => {
-                        if (!document.contains(video)) {
-                            removalObserver.disconnect();
-                            menuObserver.disconnect();
-                            onCleanup();
-                            if (video._casCleanup) video._casCleanup();
-                            startWatching();
-                        }
-                    });
-                    removalObserver.observe(parent, { childList: true });
+                const bindWhenSized = (v) => {
+                    if (v.dataset.gxBound) return;
+                    if (v.videoWidth) foundVideo(v);
+                    else v.addEventListener('loadedmetadata', () => {
+                        if (v.videoWidth) foundVideo(v);
+                    }, { once: true });
                 };
 
-                const observer = new MutationObserver((mutations) => {
-                    if (!mutations.some(m => m.addedNodes.length > 0)) return;
-                    const video = document.querySelector('video');
-                    if (video) {
-                        observer.disconnect();
-                        foundVideo(video);
-                    }
-                });
+                // Primary acquisition. Patching play() catches the element the instant xCloud
+                // plays it, even while it is still detached — capture-phase listeners on
+                // document never see events from a node outside the tree, which is why the
+                // event-only approach missed the stream.
+                const nativePlay = HTMLMediaElement.prototype.play;
+                HTMLMediaElement.prototype.play = function() {
+                    if (isStreamVideo(this)) bindWhenSized(this);
+                    return nativePlay.apply(this, arguments);
+                };
+
+                // Secondary net, in case the stream video was already playing before this
+                // script was injected. Costs nothing until a media event actually fires.
+                const onMediaReady = (e) => {
+                    if (isStreamVideo(e.target) && e.target.videoWidth) foundVideo(e.target);
+                };
+                const onMediaGone = (e) => {
+                    const v = e.target;
+                    if (v && v.tagName === 'VIDEO' && v.dataset.gxBound) teardown(v);
+                };
+                document.addEventListener('loadedmetadata', onMediaReady, true);
+                document.addEventListener('playing', onMediaReady, true);
+                document.addEventListener('emptied', onMediaGone, true);
 
                 let discordEnabledJS = false;
 
@@ -908,11 +958,11 @@ class MainActivity : AppCompatActivity() {
                     }, { threshold: 0 });
                     io.observe(panel);
                 };
-                startWatching();
-                const video = document.querySelector('video');
-                if (video) {
-                    observer.disconnect();
-                    foundVideo(video);
+                // Warm case: already streaming when the script runs (WebView restore, or
+                // re-injection after a real navigation) — no play() call or media event is
+                // coming, so neither hook above would ever fire.
+                for (const v of document.querySelectorAll('video')) {
+                    if (isStreamVideo(v)) { bindWhenSized(v); break; }
                 }
             })();
         """.trimIndent()
