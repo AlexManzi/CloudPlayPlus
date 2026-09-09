@@ -88,6 +88,35 @@ mechanisms at play:
   2. the **fallback draw path** — `if (!hasRVFC) present()`, for the case where
      `requestVideoFrameCallback` is unavailable.
 
+**The rAF liveness ticker is not sufficient on its own — do not delete its two backstops.** It only
+runs while the loop is running, and `pause`/`visibilitychange` both call `cancelFrame`. That made
+teardown permanently unreachable the moment a stream stopped: the loop died, so the check inside
+`render()` never ran again, and nothing removed the opaque `position:fixed` canvas — the last
+streamed frame stayed frozen over the whole page until a *new* stream appended a *new* canvas later
+in body order. Quitting to home or switching games hit this every time, and each exit leaked a
+canvas plus a live GL context. Two backstops close it:
+
+- **`ended` / `error` listeners bound on the element** (not `document` capture) call `teardown`
+  directly. Element-bound is deliberate: once xCloud unmounts the `<video>`, a capture listener on
+  `document` — including the existing `emptied` one — never sees the event.
+- **The watchdog** — a `setTimeout` armed by `cancelFrame` and by `scheduleFrame`'s paused/hidden
+  bail, cleared by `scheduleFrame` when frames actually resume. It re-runs the same liveness
+  predicate (plus `video.ended`) while the loop is stopped. **Zero cost while streaming: it exists
+  only when rendering has already stopped.** Do not delete it — see the paragraph above for what
+  breaks.
+
+  **It is not free when stopped, which is why the interval backs off.** A paused-but-alive video
+  (guide open, `srcObject` intact, still in the DOM) fails the predicate and keeps its frame on
+  screen — and then `checkAlive` re-arms itself. At the original flat 500 ms that was a permanent
+  2 Hz wakeup with nothing to do, for as long as the page stayed in that state. `watchdogDelay`
+  now doubles per re-arm and caps at 5 s (500 → 1000 → 2000 → 4000 → 5000), and `stopWatchdog`
+  resets it to 500 so a stream that resumes and later stops again gets a fresh fast first check.
+  **The first check is still 500 ms** — only the 2nd onward slows down, so worst-case teardown lag
+  is 5 s and only after ~12.5 s of already being stalled. Safe because the watchdog is the
+  last-resort net, not the primary path: `ended`, `error`, the document-level `emptied` listener,
+  the rAF liveness ticker, and `foundVideo` retiring the previous stream all still fire
+  immediately.
+
 `present()` early-returns unless `video.readyState >= 2 && !video.paused && !document.hidden`.
 
 ### Why the draw moved into rVFC — and why this is NOT the rejected design
@@ -216,7 +245,8 @@ bridgeCtx.globalCompositeOperation = 'copy';
 - **Reapply `imageSmoothingEnabled`/`globalCompositeOperation` after ANY `bridge.width`/`bridge.height` assignment** — per HTML spec, setting a canvas's dimensions resets its 2D context to default state. `_syncSize` reapplies both after resizing. Before this fix (2026-07-02) the settings were wiped before the first frame and 'copy' was never active in production; the ~3.25%/15min battery baseline was measured with default 'source-over'. Not yet re-measured with 'copy' active.
 - **`desynchronized: true` on bridge** — irrelevant, bridge canvas is off-screen and never composited. Do not add.
 - Bridge canvas lives at IIFE scope (not inside `setupWebGLCAS`) — reused across context loss/restore events without reallocating
-- **Sizing:** `_syncSize` sets both the output canvas and the bridge to `video.videoWidth/Height` (native stream resolution, no fractional scaling) and updates the viewport. It is debounced 16ms via `syncSize` for `resize` events, but called directly for `loadedmetadata` and at setup.
+- **Sizing:** `_syncSize` sets both the output canvas and the bridge to `video.videoWidth/Height` (native stream resolution, no fractional scaling) and updates the viewport. Called synchronously at setup and from both `loadedmetadata` and `resize`.
+- **`resize` is deliberately not debounced.** It used to go through a 16ms `setTimeout`, which left a frame where `present()` scaled the new stream resolution into the still-old bridge dimensions. xCloud switches resolution mid-stream on network conditions, so that was a visible hitch on every switch. There is nothing to debounce: the event only fires when dimensions actually changed, and the `canvas.width === w && canvas.height === h` early-return already absorbs any burst. **Do not re-add the timer.**
 - **`webglcontextlost` restores `video.style.visibility = ''`** — the handler calls `preventDefault()` but nothing guarantees `webglcontextrestored` ever fires (e.g. GPU process crash). Without this, the video stays hidden and the screen is permanently black. Worst case must degrade to unfiltered video, not black. Do not remove.
 
 ### Output canvas placement
@@ -270,19 +300,11 @@ Identifies the real stream. The element carries no id, so the checks are:
 **A `document.body { subtree: true }` MutationObserver was the old approach and is deleted.** Do not
 bring it back — see the CPU-drain note under Guide Injection.
 
-### Binding guards
+### `RTCPeerConnection` wrapper (removed)
 
-- **`bindWhenSized(v)`** — binds immediately if `videoWidth` is known, otherwise waits for a
-  one-shot `loadedmetadata`. Prevents setting up the pipeline against a 0×0 canvas.
-- **`dataset.gxBound`** — set by `foundVideo`, checked by every entry path. All three acquisition
-  paths can fire for the same element; this makes double-binding impossible.
-- **`dataset.casSetup`** — the equivalent guard one level down, inside `setupWebGLCAS`.
-- **`teardown(video)`** — full unbind: runs `_gxMenuCleanup`, runs `_casCleanup`, deletes
-  `gxBound`. The `gxBound` delete matters: xCloud may re-use the same `<video>` element for the
-  next stream, and without it that stream would never bind.
-- **`_casCleanup`** — cancels rAF/rVFC, removes all listeners, clears the sync timer, removes the
-  canvas, shrinks the bridge to 1×1, force-loses the GL context via `WEBGL_lose_context`, and
-  restores `video.style.visibility`.
+A wrapper around `window.RTCPeerConnection` briefly existed on 2026-09-02 to feed the diagnostics
+block described under Status Overlay. **It has been removed and should not be re-added.** Nothing
+in the current code patches `RTCPeerConnection`.
 
 ---
 
@@ -334,8 +356,15 @@ re-inserts either element if React removes it.
 
 `watchForJumpPanelRemoval(panel)` uses an **IntersectionObserver** (threshold 0), not a
 MutationObserver. When the panel stops intersecting, it disconnects the reinjector, clears
-`dataset.discordInjected`, and removes the status overlay. Cheaper than watching mutations and it
-correctly handles the panel being hidden rather than removed.
+`dataset.discordInjected` / `dataset.discordPending`, **removes the injected `#__notes-item` and
+`#__discord-toggle-item` rows**, and removes the status overlay. Cheaper than watching mutations and
+it correctly handles the panel being hidden rather than removed.
+
+Removing the rows is load-bearing, not tidiness: xCloud hides the guide rather than destroying it,
+so clearing only the `discordInjected` marker left the old rows in a still-live `section`, and the
+next START/MENU probe appended a second copy — two "Notes" entries and two Discord toggles. The
+first-injection path is therefore **ID-guarded** (`if (!section.querySelector('#__notes-item'))`)
+exactly like the reinjector, so both are safe to re-run.
 
 ### Injected CSS
 
@@ -362,8 +391,31 @@ injected, removed when the IntersectionObserver sees the panel leave.
 - `pointer-events:none`, `z-index:2147483647`, fixed top-right.
 - Snapshot only — rendered once when the guide opens, never ticks. The guide is transient, so a
   timer would be pure battery cost for no visible benefit. **Do not add an interval.**
-- **Known wart:** the time is hardcoded to `timeZone: 'America/New_York'`. Fine for the current
-  user, wrong for anyone else. Dropping the `timeZone` option entirely would use device local time.
+- **A temporary diagnostics block lived here on 2026-09-02 and has been removed.** It is gone
+  from the code: no `RTCPeerConnection` wrapper, no `getStats()` call, no capability probe, no
+  `webviewVersion` in `getDeviceStatusJson()`. The overlay is back to battery percentage plus
+  clock. **Do not re-add it** — it answered its question, and the answer is recorded below.
+
+  **What it found (Logitech G Cloud, WebView 151.0.7922.200):**
+  - **The video decoder is hardware and power-efficient.** `mediaCapabilities.decodingInfo`
+    with `type:'webrtc'` returned `powerEfficient: true` for the negotiated H.264 stream.
+    **The decoder is cleared as a battery suspect. Do not re-investigate it.**
+  - Latency profile: `dec 11.53ms`, `proc 12.52ms`, `jb 0.69ms`. The very low jitter-buffer
+    delay means the buffer is already essentially bypassed, which is the correct low-latency
+    configuration — **do not add buffering**.
+  - The device runs Android 11 but a **modern WebView (M151)**. "The WebView is too old" is
+    never a valid reason to rule out a web API here. Feature-detect instead.
+
+  **Two traps, so nobody repeats them:**
+  1. `decoderImplementation` and `powerEfficientDecoder` came back **absent even on M151**. They
+     are the only `std::optional` fields in that stat group in `pc/rtc_stats_collector.cc`, both
+     written under `has_value()`. **Never build a diagnostic on those two fields.**
+  2. `totalDecodeTime / framesDecoded` is **not CPU cost**, so it cannot separate hardware from
+     software decode. Chromium's `RTCVideoDecoderAdapter::OnOutput` calls `Decoded(rtc_frame)`
+     with no explicit `decode_time_ms`, so `generic_decoder.cc` falls back to
+     `now - decode_start`, i.e. wall clock across an async round trip to the GPU process. A
+     hardware decoder holding about a frame and a software decoder burning real CPU both land
+     near 11 ms. It measures latency, not power.
 
 ---
 
@@ -423,6 +475,17 @@ A minimal local notepad, opened from the guide item via `AndroidBridge.openNotes
   creating a new note.
 - `notesLoaded` gates `saveNotes()` — prevents an empty in-memory list from overwriting the file
   before the first load completes.
+- **`notesLoadingEditor` gates `autoSave()`** — `loadNoteIntoEditor` sets it around the `setText`
+  pair. Without it, `titleEdit.setText(note.title)` fires `afterTextChanged` → `autoSave`, which
+  reads **both** fields — and `bodyEdit` still holds the *previously viewed* note's text at that
+  point, so it was written into the note being loaded. `bodyEdit.setText(note.body)` on the next
+  line then read back the clobbered value and the debounced save persisted it. Symptoms were:
+  opening Notes wiped the selected note's body to `""` (editors start empty), and switching from
+  note A to B replaced B's body with A's. **Never call `setText` on these editors outside this
+  guard.**
+- **`notesDirty` gates the actual write.** Set by `autoSave` and by the structural mutations
+  (new/delete), cleared only after `finishWrite` succeeds — a failed write stays dirty so the next
+  attempt still runs. Keeps `forceNoteSave` on every pause/close from rewriting an unchanged file.
 - The list always keeps at least one note; deleting the last one creates a fresh empty note.
 - Back button precedence: Notes visible → hide Notes; otherwise → WebView history.
 - Load failures are swallowed and treated as "no notes" rather than crashing.
@@ -432,7 +495,7 @@ A minimal local notepad, opened from the guide item via `AndroidBridge.openNotes
 ## Android / Kotlin
 
 - **`preferMinimalPostProcessing = true`** — disables SurfaceFlinger HDR tone-mapping and display post-processing. Real battery saving.
-- **`preferredDisplayModeId` → 60Hz** — prevents display running at higher refresh rates for a 60fps stream
+- **`preferredDisplayModeId` → 60Hz** — prevents display running at higher refresh rates for a 60fps stream. The candidate list is **filtered to the current mode's `physicalWidth`/`physicalHeight`** first: `supportedModes` can include 60Hz entries at a lower resolution, and picking one purely by refresh rate would silently downscale the panel.
 - **`LAYER_TYPE_NONE`** — WebView default. Do not change to `LAYER_TYPE_HARDWARE` (adds an extra off-screen compositing texture wrapping a WebView that already does its own GPU rendering)
 - **`setBackgroundDrawable(null)` + black WebView bg** — eliminates window background overdraw
 - **`importantForAutofill = NO`, `importantForAccessibility = NO`** — prevents autofill/accessibility scans on focus, saves CPU
@@ -447,8 +510,9 @@ A minimal local notepad, opened from the guide item via `AndroidBridge.openNotes
 - **`AUDIOFOCUS_GAIN`** — correct for a multi-hour gaming session. `AUDIOFOCUS_GAIN_TRANSIENT` is for brief interruptions and would allow other apps to resume audio mid-game.
 - **`MODE_NIGHT_YES` set before `super.onCreate`** — avoids a re-create for a config change
 - **`largeHeap` removed** — WebView runs in a separate renderer process; largeHeap only affects the tiny main process. No benefit.
-- **`forceDark = FORCE_DARK_OFF` / `setAlgorithmicDarkeningAllowed(false)`** — prevents WebView from applying color inversion on top of Xbox's already-dark UI. Likely no measurable battery saving since the site is already dark, but correct.
-- **`onDestroy` nulls the clients before `destroy()`** on both WebViews — avoids callbacks into a torn-down Activity.
+- **`forceDark = FORCE_DARK_OFF` / `setAlgorithmicDarkeningAllowed(false)`** — prevents WebView from applying color inversion on top of Xbox's already-dark UI. Likely no measurable battery saving since the site is already dark, but correct. **The `forceDark` branch is guarded to API 29+**: it is a 29+ API and `minSdk` is 26, so 26–28 would throw `NoSuchMethodError` at startup. Those versions have no dark-mode coercion to disable, so the branch is simply skipped.
+- **`@Volatile discordEnabled`** — written from the WebView's JS thread via `StreamBridge.setDiscordEnabled`, read on the UI thread in `dispatchTouchEvent`. `@JavascriptInterface` methods do not run on the UI thread.
+- **`onDestroy` nulls the clients before `destroy()`** on both WebViews — avoids callbacks into a torn-down Activity. It also detaches each WebView from its parent before `destroy()` (required by the WebView docs) and clears `tapHandler` / `notesAutoSaveHandler`, whose pending runnables would otherwise fire against a destroyed Activity for up to 600ms.
 
 ---
 
