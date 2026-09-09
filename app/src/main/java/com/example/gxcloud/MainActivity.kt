@@ -17,6 +17,7 @@ import android.util.AtomicFile
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.ViewStub
 import android.view.WindowManager
 import android.webkit.CookieManager
@@ -53,7 +54,9 @@ class MainActivity : AppCompatActivity() {
 
     private enum class DiscordState { CLOSED, UI_VISIBLE }
     private var discordState = DiscordState.CLOSED
-    private var discordEnabled = false
+    // Written from the WebView's JS thread via StreamBridge, read on the UI thread in
+    // dispatchTouchEvent.
+    @Volatile private var discordEnabled = false
     private var tapCount = 0
     private val tapHandler = Handler(Looper.getMainLooper())
     private val viewLocation = IntArray(2)
@@ -68,6 +71,11 @@ class MainActivity : AppCompatActivity() {
     private val notesList = mutableListOf<Note>()
     private var selectedNoteId: String? = null
     private var notesLoaded = false
+    // Set while loadNoteIntoEditor is driving the EditTexts. setText fires afterTextChanged,
+    // and autoSave reads *both* fields — so without this the title's watcher writes the
+    // still-stale bodyEdit contents into the note being loaded, destroying its body.
+    private var notesLoadingEditor = false
+    private var notesDirty = false
 
     data class Note(val id: String, var title: String, var body: String, var updatedAt: Long)
 
@@ -101,8 +109,14 @@ class MainActivity : AppCompatActivity() {
         // Limit to 60Hz to save battery
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val lp = window.attributes
-            display?.supportedModes?.minByOrNull { abs(it.refreshRate - 60f) }?.let {
-                lp.preferredDisplayModeId = it.modeId
+            display?.let { d ->
+                // Only consider modes at the panel's current resolution — some devices expose
+                // 60Hz modes at a lower physical size, which would silently downscale the stream.
+                val cur = d.mode
+                d.supportedModes
+                    .filter { it.physicalWidth == cur.physicalWidth && it.physicalHeight == cur.physicalHeight }
+                    .minByOrNull { abs(it.refreshRate - 60f) }
+                    ?.let { lp.preferredDisplayModeId = it.modeId }
             }
             lp.preferMinimalPostProcessing = true
             window.attributes = lp
@@ -141,6 +155,10 @@ class MainActivity : AppCompatActivity() {
         webView.setLayerType(View.LAYER_TYPE_NONE, null)
         webView.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
         webView.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        // ContentCapture is API 30+; minSdk is 26.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            webView.importantForContentCapture = View.IMPORTANT_FOR_CONTENT_CAPTURE_NO
+        }
         webView.isHapticFeedbackEnabled = false
         webView.isLongClickable = false
         webView.setOnHoverListener { _, _ -> true }
@@ -164,7 +182,9 @@ class MainActivity : AppCompatActivity() {
             setOffscreenPreRaster(false)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 setAlgorithmicDarkeningAllowed(false)
-            } else {
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // forceDark is API 29+; minSdk is 26, so this would throw NoSuchMethodError
+                // on 26-28. Those versions have no dark-mode coercion to disable anyway.
                 @Suppress("DEPRECATION")
                 forceDark = android.webkit.WebSettings.FORCE_DARK_OFF
             }
@@ -210,12 +230,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        tapHandler.removeCallbacksAndMessages(null)
+        notesAutoSaveHandler.removeCallbacksAndMessages(null)
+        notesSaveRunnable = null
         webView.webViewClient = WebViewClient()
         webView.webChromeClient = null
+        (webView.parent as? ViewGroup)?.removeView(webView)
         webView.destroy()
-        discordWebView?.webViewClient = WebViewClient()
-        discordWebView?.webChromeClient = null
-        discordWebView?.destroy()
+        discordWebView?.let { dv ->
+            dv.webViewClient = WebViewClient()
+            dv.webChromeClient = null
+            (dv.parent as? ViewGroup)?.removeView(dv)
+            dv.destroy()
+        }
         super.onDestroy()
     }
 
@@ -276,6 +303,9 @@ class MainActivity : AppCompatActivity() {
             dv.isSaveFromParentEnabled = false
             dv.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
             dv.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                dv.importantForContentCapture = View.IMPORTANT_FOR_CONTENT_CAPTURE_NO
+            }
             dv.setBackgroundColor(android.graphics.Color.BLACK)
             dv.settings.apply {
                 javaScriptEnabled = true
@@ -348,6 +378,7 @@ class MainActivity : AppCompatActivity() {
             forceNoteSave()
             val note = Note(UUID.randomUUID().toString(), "", "", System.currentTimeMillis())
             notesList.add(0, note)
+            notesDirty = true
             saveNotes()
             selectNote(note.id, listContainer, titleEdit, bodyEdit)
         }
@@ -361,9 +392,10 @@ class MainActivity : AppCompatActivity() {
                     if (notesList.isEmpty()) {
                         notesList.add(Note(UUID.randomUUID().toString(), "", "", System.currentTimeMillis()))
                     }
+                    notesDirty = true
                     saveNotes()
+                    // selectNote already rebuilds the list.
                     selectNote(notesList[0].id, listContainer, titleEdit, bodyEdit)
-                    rebuildNotesList(listContainer, titleEdit, bodyEdit)
                 }
                 .setNegativeButton("Cancel", null)
                 .show()
@@ -371,11 +403,12 @@ class MainActivity : AppCompatActivity() {
 
         val autoSave = {
             val id = selectedNoteId
-            if (id != null) {
+            if (id != null && !notesLoadingEditor) {
                 notesList.find { it.id == id }?.let {
                     it.title = titleEdit.text.toString()
                     it.body = bodyEdit.text.toString()
                     it.updatedAt = System.currentTimeMillis()
+                    notesDirty = true
                 }
                 scheduleNoteSave()
             }
@@ -430,9 +463,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadNoteIntoEditor(id: String, titleEdit: EditText, bodyEdit: EditText) {
         val note = notesList.find { it.id == id } ?: return
-        titleEdit.setText(note.title)
-        bodyEdit.setText(note.body)
-        titleEdit.setSelection(note.title.length)
+        notesLoadingEditor = true
+        try {
+            titleEdit.setText(note.title)
+            bodyEdit.setText(note.body)
+            titleEdit.setSelection(note.title.length)
+        } finally {
+            notesLoadingEditor = false
+        }
     }
 
     @SuppressLint("SetTextI18n")
@@ -458,7 +496,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun scheduleNoteSave() {
         notesSaveRunnable?.let { notesAutoSaveHandler.removeCallbacks(it) }
-        val r = Runnable { saveNotes() }
+        val r = Runnable {
+            notesSaveRunnable = null
+            saveNotes()
+        }
         notesSaveRunnable = r
         notesAutoSaveHandler.postDelayed(r, 600)
     }
@@ -483,7 +524,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun saveNotes() {
-        if (!notesLoaded) return
+        if (!notesLoaded || !notesDirty) return
         try {
             val arr = JSONArray()
             notesList.forEach { note ->
@@ -498,6 +539,9 @@ class MainActivity : AppCompatActivity() {
             try {
                 stream.write(arr.toString().toByteArray())
                 notesFile.finishWrite(stream)
+                // Only clear on a completed write — a failure must stay dirty so the next
+                // save attempt still has a reason to run.
+                notesDirty = false
             } catch (e: Exception) {
                 notesFile.failWrite(stream)
                 throw e
@@ -543,6 +587,7 @@ class MainActivity : AppCompatActivity() {
                 document.documentElement.style.overscrollBehavior = 'none';
                 document.body.style.overscrollBehavior = 'none';
 
+
                 const triVerts = new Float32Array([-1,-1,3,-1,-1,3]);
                 const EMPTY_PIXEL = new Uint8Array([0,0,0,255]);
 
@@ -552,7 +597,7 @@ class MainActivity : AppCompatActivity() {
                 bridgeCtx.globalCompositeOperation = 'copy';
 
                 const style = document.createElement('style');
-                style.textContent = '* { -webkit-tap-highlight-color: transparent !important; outline: none !important; } button[aria-label="Exit preview"] { visibility: hidden !important; }';
+                style.textContent = '* { -webkit-tap-highlight-color: transparent !important; outline: none !important; }';
                 document.head.appendChild(style);
 
                 // Returns true once the toggle is hidden (or was already hidden), so callers
@@ -572,12 +617,19 @@ class MainActivity : AppCompatActivity() {
                     return true;
                 };
 
+                // Exactly one stream may own the pipeline at a time. `bridge` is shared by every
+                // pipeline and _casCleanup shrinks it to 1x1, so an old pipeline tearing down
+                // after a new one binds would leave the new one drawing through a 1x1 bridge —
+                // on top of two stacked opaque canvases and two live GL contexts.
+                let activeStreamVideo = null;
+
                 // Full unbind: menu watch, CAS pipeline, and the binding marker, so the next
                 // stream can bind even if xCloud re-uses the same <video> element.
                 const teardown = (video) => {
                     if (video._gxMenuCleanup) video._gxMenuCleanup();
                     if (video._casCleanup) video._casCleanup();
                     delete video.dataset.gxBound;
+                    if (activeStreamVideo === video) activeStreamVideo = null;
                 };
 
                 const setupWebGLCAS = (video) => {
@@ -589,10 +641,23 @@ class MainActivity : AppCompatActivity() {
                     document.body.appendChild(canvas);
                     video.style.visibility = 'hidden';
 
-                    const gl = canvas.getContext('webgl2', { powerPreference: 'low-power', alpha: false, depth: false, stencil: false, preserveDrawingBuffer: false, antialias: false, desynchronized: true, premultipliedAlpha: false });
-                    if (!gl) {
+                    // Unwind a partial setup completely, so the element stays eligible for a
+                    // later acquisition event instead of being stuck with casSetup set and no
+                    // pipeline behind it.
+                    const abortSetup = (glCtx, program, shaders) => {
+                        if (glCtx) {
+                            if (shaders) for (const s of shaders) if (s) glCtx.deleteShader(s);
+                            if (program) glCtx.deleteProgram(program);
+                            glCtx.getExtension('WEBGL_lose_context')?.loseContext();
+                        }
                         canvas.remove();
                         video.style.visibility = '';
+                        delete video.dataset.casSetup;
+                    };
+
+                    const gl = canvas.getContext('webgl2', { powerPreference: 'low-power', alpha: false, depth: false, stencil: false, preserveDrawingBuffer: false, antialias: false, desynchronized: true, premultipliedAlpha: false });
+                    if (!gl) {
+                        abortSetup(null, null, null);
                         return;
                     }
 
@@ -614,8 +679,7 @@ class MainActivity : AppCompatActivity() {
                     const vs = mkShader(gl.VERTEX_SHADER, vert);
                     const fs = mkShader(gl.FRAGMENT_SHADER, frag);
                     if (!vs || !fs) {
-                        canvas.remove();
-                        video.style.visibility = '';
+                        abortSetup(gl, prog, [vs, fs]);
                         return;
                     }
                     gl.attachShader(prog, vs);
@@ -624,8 +688,7 @@ class MainActivity : AppCompatActivity() {
                     gl.detachShader(prog, vs); gl.deleteShader(vs);
                     gl.detachShader(prog, fs); gl.deleteShader(fs);
                     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-                        canvas.remove();
-                        video.style.visibility = '';
+                        abortSetup(gl, prog, null);
                         return;
                     }
                     gl.useProgram(prog);
@@ -653,8 +716,12 @@ class MainActivity : AppCompatActivity() {
                     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, EMPTY_PIXEL);
                     gl.activeTexture(gl.TEXTURE0);
                     gl.uniform1i(gl.getUniformLocation(prog, 'data'), 0);
-                    let syncTimer = null;
-                    const syncSize = () => { clearTimeout(syncTimer); syncTimer = setTimeout(_syncSize, 16); };
+                    // Runs synchronously on 'resize'. It used to be debounced 16ms, which left a
+                    // frame where present() scaled the new stream resolution into the old bridge
+                    // size — xCloud changes resolution mid-stream on network conditions, so that
+                    // was a visible hitch every switch. Nothing to debounce: the event only fires
+                    // when the dimensions actually changed, and the equality check below already
+                    // absorbs any burst.
                     const _syncSize = () => {
                         if (!video.videoWidth || !video.videoHeight) return;
                         const w = video.videoWidth;
@@ -670,7 +737,7 @@ class MainActivity : AppCompatActivity() {
                     _syncSize();
 
                     video.addEventListener('loadedmetadata', _syncSize);
-                    video.addEventListener('resize', syncSize);
+                    video.addEventListener('resize', _syncSize);
 
                     let frameHandle = null;
                     let vfcHandle = null;
@@ -695,8 +762,46 @@ class MainActivity : AppCompatActivity() {
                             vfcHandle = video.requestVideoFrameCallback(onVFC);
                     };
 
+                    // Teardown detection has to survive a stopped loop. 'pause' and
+                    // visibilitychange both cancel rAF, and the liveness check lives inside
+                    // render() — so quitting a game or switching games left the last frame
+                    // frozen under the opaque canvas with no path back to teardown. This only
+                    // ticks while the loop is already stopped: zero cost while streaming.
+                    let watchdog = null;
+                    let watchdogDelay = 500;
+                    const stopWatchdog = () => {
+                        if (watchdog !== null) { clearTimeout(watchdog); watchdog = null; }
+                        // Reset here, not in armWatchdog: stopWatchdog is the "loop is alive
+                        // again" signal (scheduleFrame calls it on resume), so the next stall
+                        // starts back at a fast 500ms first check.
+                        watchdogDelay = 500;
+                    };
+                    const checkAlive = () => {
+                        watchdog = null;
+                        if (!video.srcObject || !document.contains(video) || video.ended) {
+                            teardown(video);
+                            return;
+                        }
+                        // Paused-but-alive (srcObject intact, still in the DOM): nothing can
+                        // change until an event fires, so don't keep polling at 2Hz forever —
+                        // that was a permanent wakeup with nothing to do. Backs off
+                        // 500 -> 1000 -> 2000 -> 4000 -> 5000ms. First check is still 500ms.
+                        if (frameHandle === null) {
+                            watchdogDelay = Math.min(watchdogDelay * 2, 5000);
+                            watchdog = setTimeout(checkAlive, watchdogDelay);
+                        }
+                    };
+                    const armWatchdog = () => {
+                        if (watchdog === null) watchdog = setTimeout(checkAlive, watchdogDelay);
+                    };
+
                     const scheduleFrame = () => {
-                        if (frameHandle !== null || video.paused || document.hidden) return;
+                        if (frameHandle !== null) return;
+                        // Arm rather than bail silently: this is the path taken when setup runs
+                        // against an already-paused video, and when visibilitychange restores a
+                        // stream that died while backgrounded.
+                        if (video.paused || document.hidden) { armWatchdog(); return; }
+                        stopWatchdog();
                         frameHandle = requestAnimationFrame(render);
                         if (hasRVFC && vfcHandle === null) vfcHandle = video.requestVideoFrameCallback(onVFC);
                     };
@@ -704,6 +809,7 @@ class MainActivity : AppCompatActivity() {
                     const cancelFrame = () => {
                         if (frameHandle !== null) { cancelAnimationFrame(frameHandle); frameHandle = null; }
                         if (vfcHandle !== null) { video.cancelVideoFrameCallback(vfcHandle); vfcHandle = null; }
+                        armWatchdog();
                     };
 
                     // The rAF loop still spins every frame — it keeps the compositor and the
@@ -726,49 +832,65 @@ class MainActivity : AppCompatActivity() {
                     };
 
                     const onVisibility = () => { if (document.hidden) cancelFrame(); else scheduleFrame(); };
+                    // Bound on the element, not document capture: once xCloud unmounts the
+                    // <video> these still fire, whereas the document-level 'emptied' listener
+                    // never sees an event from a detached node.
+                    const onStreamEnd = () => teardown(video);
                     video.addEventListener('pause', cancelFrame);
                     video.addEventListener('play', scheduleFrame);
+                    video.addEventListener('ended', onStreamEnd);
+                    video.addEventListener('error', onStreamEnd);
                     document.addEventListener('visibilitychange', onVisibility);
                     scheduleFrame();
 
-                    canvas.addEventListener('webglcontextlost', (e) => {
-                        e.preventDefault();
+                    // stopWatchdog() must follow cancelFrame() — cancelFrame arms the watchdog,
+                    // so the reverse order leaves a timer running against a torn-down pipeline.
+                    const detach = () => {
                         cancelFrame();
+                        stopWatchdog();
                         video.removeEventListener('pause', cancelFrame);
                         video.removeEventListener('play', scheduleFrame);
+                        video.removeEventListener('ended', onStreamEnd);
+                        video.removeEventListener('error', onStreamEnd);
                         document.removeEventListener('visibilitychange', onVisibility);
-                        clearTimeout(syncTimer);
                         video.removeEventListener('loadedmetadata', _syncSize);
-                        video.removeEventListener('resize', syncSize);
+                        video.removeEventListener('resize', _syncSize);
+                        canvas.removeEventListener('webglcontextlost', onContextLost, false);
                         canvas.remove();
                         video.style.visibility = '';
                         delete video.dataset.casSetup;
                         delete video._casCleanup;
-                    }, false);
-                    canvas.addEventListener('webglcontextrestored', () => {
-                        setupWebGLCAS(video);
-                    }, false);
+                    };
+
+                    const onContextLost = (e) => {
+                        e.preventDefault();
+                        detach();
+                    };
+                    const onContextRestored = () => { setupWebGLCAS(video); };
+                    canvas.addEventListener('webglcontextlost', onContextLost, false);
+                    canvas.addEventListener('webglcontextrestored', onContextRestored, false);
 
                     video._casCleanup = () => {
-                        cancelFrame();
-                        video.removeEventListener('pause', cancelFrame);
-                        video.removeEventListener('play', scheduleFrame);
-                        document.removeEventListener('visibilitychange', onVisibility);
-                        clearTimeout(syncTimer);
-                        video.removeEventListener('loadedmetadata', _syncSize);
-                        video.removeEventListener('resize', syncSize);
-                        canvas.remove();
+                        detach();
+                        // Both context listeners must be gone before loseContext(): it queues a
+                        // real 'webglcontextlost' task, and by the time that task runs xCloud may
+                        // have re-used this same <video> for the next stream. The stale handler
+                        // would then delete the new pipeline's casSetup/_casCleanup (leaking its
+                        // GL context and canvas on the following switch) and unhide the video so
+                        // it composites underneath the new opaque canvas every frame.
+                        canvas.removeEventListener('webglcontextrestored', onContextRestored, false);
                         bridge.width = 1; bridge.height = 1;
                         gl.getExtension('WEBGL_lose_context')?.loseContext();
-                        video.style.visibility = '';
-                        delete video.dataset.casSetup;
-                        delete video._casCleanup;
                     };
                 };
 
                 const foundVideo = (video) => {
                     if (video.dataset.gxBound) return;
+                    // Retire the previous stream before the new one allocates anything — see
+                    // activeStreamVideo above for why overlap is not survivable.
+                    if (activeStreamVideo && activeStreamVideo !== video) teardown(activeStreamVideo);
                     video.dataset.gxBound = 'true';
+                    activeStreamVideo = video;
 
                     // xCloud renders the quick-actions toggle in the same commit as the video,
                     // so it is normally already in the DOM — check synchronously first. A
@@ -852,17 +974,32 @@ class MainActivity : AppCompatActivity() {
                 let discordEnabledJS = false;
 
                 const injectDiscordToggle = (panel) => {
-                    if (panel.dataset.discordInjected) return;
+                    if (panel.dataset.discordInjected || panel.dataset.discordPending) return;
                     const section = panel.querySelector('section[data-auto-focus="true"]');
                     if (!section) {
+                        panel.dataset.discordPending = 'true';
+                        let waitSafety;
                         const waitObserver = new MutationObserver(() => {
                             const s = panel.querySelector('section[data-auto-focus="true"]');
-                            if (s) { waitObserver.disconnect(); injectDiscordToggle(panel); }
+                            if (s) {
+                                waitObserver.disconnect();
+                                clearTimeout(waitSafety);
+                                delete panel.dataset.discordPending;
+                                injectDiscordToggle(panel);
+                            }
                         });
                         waitObserver.observe(panel, { childList: true, subtree: true });
+                        // Bounded like armJumpPanelWatch's safety net below — the section can
+                        // fail to ever render (panel removed, upstream markup change), and
+                        // without this the observer would watch the subtree forever.
+                        waitSafety = setTimeout(() => {
+                            waitObserver.disconnect();
+                            delete panel.dataset.discordPending;
+                        }, 3000);
                         return;
                     }
                     panel.dataset.discordInjected = 'true';
+                    watchForJumpPanelRemoval(panel);
 
                     const buildNotesEl = () => {
                         const el = document.createElement('div');
@@ -893,8 +1030,12 @@ class MainActivity : AppCompatActivity() {
                         return el;
                     };
 
-                    section.appendChild(buildNotesEl());
-                    section.appendChild(buildToggleEl());
+                    // ID-guarded like the reinjector below: the panel can be re-injected after
+                    // watchForJumpPanelRemoval clears the marker, and xCloud hides the guide
+                    // rather than destroying it — so the section (and our rows) can still be
+                    // there, which is how duplicate Notes/Discord entries appeared.
+                    if (!section.querySelector('#__notes-item')) section.appendChild(buildNotesEl());
+                    if (!section.querySelector('#__discord-toggle-item')) section.appendChild(buildToggleEl());
 
                     const buildStatusOverlay = () => {
                         let pct = '--';
@@ -905,12 +1046,24 @@ class MainActivity : AppCompatActivity() {
                             }
                         } catch(e) {}
                         const now = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }).format(new Date());
+                        const video = activeStreamVideo || document.querySelector('video[data-gx-bound]');
+                        const width = video?.videoWidth || 0;
+                        const height = video?.videoHeight || 0;
+                        const quality = video?.getVideoPlaybackQuality?.();
+                        const decoded = quality?.totalVideoFrames ?? video?.webkitDecodedFrameCount ?? '--';
+                        const dropped = quality?.droppedVideoFrames ?? video?.webkitDroppedFrameCount ?? '--';
                         const el = document.createElement('div');
                         el.id = '__gxcloud-status-overlay';
-                        el.style.cssText = 'all:initial;position:fixed;top:5%;right:32px;pointer-events:none;display:flex;flex-direction:row;align-items:center;gap:10px;z-index:2147483647;';
-                        el.innerHTML = '<span style="all:initial;display:block;color:#fff;font-size:15px;font-weight:600;font-family:sans-serif;text-shadow:0 1px 4px rgba(0,0,0,.8);">' + pct + '%</span><span style="all:initial;display:block;color:#fff;font-size:15px;font-family:sans-serif;text-shadow:0 1px 4px rgba(0,0,0,.8);">' + now + '</span>';
+                        el.style.cssText = 'all:initial;position:fixed;top:5%;right:32px;pointer-events:none;display:flex;flex-direction:column;align-items:flex-end;gap:2px;z-index:2147483647;';
+                        const line = (label, value, bold = false) => '<span style="all:initial;display:block;color:#fff;font:' + (bold ? '600 ' : '') + '15px/1.35 sans-serif;text-shadow:0 1px 4px rgba(0,0,0,.8);">' + label + ': ' + value + '</span>';
+                        el.innerHTML = line('Battery', pct + '%', true) +
+                            line('Time', now) +
+                            line('Resolution', width && height ? width + '×' + height : '--') +
+                            line('Decoded', decoded) +
+                            line('Dropped', dropped);
                         return el;
                     };
+
                     document.getElementById('__gxcloud-status-overlay')?.remove();
                     document.documentElement.appendChild(buildStatusOverlay());
 
@@ -924,12 +1077,10 @@ class MainActivity : AppCompatActivity() {
 
                 let jumpWatchArmed = false;
                 const armJumpPanelWatch = () => {
-                    // const panel = document.getElementById('jump-panel');
                     const tryInject = () => {
                         const panel = document.getElementById('guide-tabpanel-jump');
                         if (panel && !panel.dataset.discordInjected) {
                             injectDiscordToggle(panel);
-                            watchForJumpPanelRemoval(panel);
                         }
                         return !!panel;
                     };
@@ -953,6 +1104,11 @@ class MainActivity : AppCompatActivity() {
                             io.disconnect();
                             if (panel._discordReinjector) { panel._discordReinjector.disconnect(); panel._discordReinjector = null; }
                             delete panel.dataset.discordInjected;
+                            delete panel.dataset.discordPending;
+                            // Remove the rows too, not just the marker. Leaving them behind is
+                            // what let the next injection stack a second copy on top.
+                            panel.querySelector('#__notes-item')?.remove();
+                            panel.querySelector('#__discord-toggle-item')?.remove();
                             document.getElementById('__gxcloud-status-overlay')?.remove();
                         }
                     }, { threshold: 0 });
