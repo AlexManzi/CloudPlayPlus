@@ -14,12 +14,13 @@ All empirical findings below are specific to this device/WebView combination unl
 
 ## Current State at a Glance
 
-The entire app is one file: `app/src/main/java/com/example/gxcloud/MainActivity.kt` (~970 lines).
-Roughly the first 540 lines are Kotlin; the rest is `INJECT_SCRIPT`, a JS blob evaluated into the
-main WebView on every `onPageFinished`.
+The app entry point is `app/src/main/java/com/example/gxcloud/MainActivity.kt`; focused Android
+responsibilities live in `DiscordController.kt`, `NotesController.kt`, and `StreamBridge.kt`.
+The injected WebView JavaScript lives in `app/src/main/res/raw/gxcloud_inject.js` and is evaluated
+into the main WebView on every `onPageFinished`.
 
 - **Main WebView** loads `https://play.xbox.com/` with a Windows/Edge desktop user agent.
-- **CAS shader**: `INJECT_SCRIPT` finds the real stream `<video>`, hides it, and draws a sharpened
+- **CAS shader**: `gxcloud_inject.js` finds the real stream `<video>`, hides it, and draws a sharpened
   copy to a fixed-position WebGL2 canvas layered over the page.
 - **Discord** and **Notes** are lazily-inflated `ViewStub`s — zero cost until first opened.
 - **Guide injection**: a Notes item, a Discord toggle, and a battery/clock overlay are injected
@@ -27,7 +28,7 @@ main WebView on every `onPageFinished`.
 - **`AndroidBridge`** (`StreamBridge`) is the JS↔Kotlin channel: `setDiscordEnabled`, `openNotes`,
   `getDeviceStatusJson`.
 
-Anchors worth knowing by name: `INJECT_SCRIPT`, `setupWebGLCAS`, `foundVideo`, `isStreamVideo`,
+Anchors worth knowing by name: `gxcloud_inject.js`, `setupWebGLCAS`, `foundVideo`, `isStreamVideo`,
 `injectDiscordToggle`, `armJumpPanelWatch`, `StreamBridge`.
 
 ---
@@ -212,7 +213,7 @@ boost.
 - **`textureOffset(data, vUV, ivec2(...))`** — constant-offset variant; GLSL ES 3.0 core. Compiler folds the offset into the texture fetch. Equivalent cost to a plain `texture()` call. Offsets ±1 are well within `gl_MinProgramTexelOffset`/`gl_MaxProgramTexelOffset` range.
 - **`precision mediump float`** — Adreno 618 runs mediump on FP16 ALUs (~2× throughput vs highp). Do not change to highp.
 - **`const vec3 lw`** — compile-time constant enables driver constant folding on all `dot(x, lw)` calls. Do not make it a uniform.
-- **`const float sharpenFactor = 0.37`** — compile-time constant, no uniform lookup needed. This is the tuned strength; changing it changes the look.
+- **`const float sharpenFactor = 0.37`** — compile-time constant, no uniform lookup needed. This is the tuned strength; changing it changes the look. **It drifted to `3.0` at some point and was restored on 2026-09-10.** At 3.0 the sharpen is ~8× too strong: the soft limiter caps `detL/(1+4|detL|)` at 0.25, so the max luma push is ~0.75 (then hard-clamped by the final `clamp`) versus ~0.09 at 0.37 — halos and ringing on hard edges, clipped highlights, and amplified compression noise/banding in shadows despite the dark gate. If the image ever looks crunchy, check this constant first.
 - **`amp = mn_l / (mx_l + 0.01)`** — the CAS adaptive term, already in simplified form (3 GPU ops: add, RCP, mul). No `sqrt` — it was removed.
 - **Dark gate `wm = clamp((le - 0.05) * 2.2222, 0, 1)`** — suppresses sharpening in dark areas so stream noise in shadows is not amplified. Doubles as the saturation-boost weight.
 - **Contrast gate `cg = clamp((mx_l - mn_l - 0.005) * 28.57, 0, 1)`** — suppresses sharpening on near-flat regions. Without it, compression noise and banding in smooth gradients (skies, walls, UI backgrounds) get sharpened into visible texture. Fades in over a narrow luma-range window rather than switching hard, to avoid a visible threshold edge.
@@ -534,7 +535,7 @@ A minimal local notepad, opened from the guide item via `AndroidBridge.openNotes
 
 - **`canvas.style.contain = 'strict'`** — tells browser this canvas is independent from page layout; prevents layout/paint recalculation from propagating through/to the canvas
 - **`overscrollBehavior = 'none'`** on both `documentElement` and `body` — prevents pull-to-refresh and overscroll effects
-- **`window.__gxcloudInjected` guard** — `INJECT_SCRIPT` runs on every `onPageFinished`; the IIFE
+- **`window.__gxcloudInjected` guard** — `gxcloud_inject.js` runs on every `onPageFinished`; the IIFE
   returns immediately if it has already run in this document
 - **`onPageFinished` checks `url == view.url`** — skips injection for stale/iframe page-finish callbacks
 - WebGL canvas is already on its own GPU compositor layer by definition. `translateZ(0)` and `will-change: transform` are no-ops on WebGL canvases.
