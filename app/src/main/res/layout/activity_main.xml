@@ -18,4 +18,10 @@
         android:layout_height="match_parent"
         android:layout="@layout/layout_notes" />
 
+    <ViewStub
+        android:id="@+id/quickMenuStub"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout="@layout/layout_quick_menu" />
+
 </merge>
