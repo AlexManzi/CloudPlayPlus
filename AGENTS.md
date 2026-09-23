@@ -74,6 +74,27 @@ mechanisms at play:
 **Do not switch to `texSubImage2D` for the bridge canvas. Do not pre-allocate with `texStorage2D`.
 `texImage2D` every frame is correct.**
 
+### Why not WebGPU
+
+Tried 2026-09-23 (WebView 151.0.7922.200). `navigator.gpu.requestAdapter({ featureLevel:
+'compatibility' })` succeeds on the G Cloud (Dawn's **OpenGL ES** backend, no `shader-f16`), so a
+renderer was built: `importExternalTexture` each frame → WGSL port of the CAS shader, with no bridge.
+It was meant to remove the `drawImage` copy.
+
+**Result: the app crashes about 13 s into every stream.** Logcat, in order:
+`Adreno-GSL IOCTL_KGSL_GPUOBJ_IMPORT failed: errno 12 Out of memory` → `Failed to create EGLImage:
+EGL_BAD_ACCESS` → `Error creating wgpu::Texture` → WebRTC `Failed to decode frame` (xCloud drops to
+the dashboard) → `SIGSEGV` null deref in `Chrome_InProcGp`. Each frame's import leaks a kernel GPU
+import inside Chromium/Dawn's GLES path. Importing `new VideoFrame(video)` and calling `close()`
+after submit did **not** help, so the leak isn't reachable from JS.
+
+WebView runs its GPU thread **inside the app process**, so a Dawn crash kills the whole app. A JS
+fallback (device-lost or error handlers dropping to WebGL2) can't catch it. The only other WebGPU
+upload, `copyExternalImageToTexture`, is a full copy, the same as the bridge, so there's nothing to gain.
+
+**Do not re-attempt WebGPU for the video path on this device.** If a new WebView major version
+ships, re-test only with `adb logcat` running and look for `GPUOBJ_IMPORT` errors.
+
 ---
 
 ## Render Loop
@@ -563,6 +584,7 @@ A minimal local notepad, opened from the guide item via `AndroidBridge.openNotes
 | VideoFrame + texSubImage2D | Smooth but higher battery than bridge — rejected |
 | Direct upload: `gl.texImage2D(…, video)` (no bridge canvas) | 4%/15min vs ~3.25% bridge baseline (~23% worse) — rejected. Consistent with external-OES resolve theory: VideoFrame source is GL_TEXTURE_EXTERNAL_OES; resolving to sampler2D adds a CPU staging path. Bridge canvas avoids this entirely. |
 | Bridge canvas + texImage2D | Best battery — current approach |
+| WebGPU `importExternalTexture` renderer (compat adapter, Dawn GLES backend) | **Crashes the app** ~13 s into a stream — rejected 2026-09-23, never reached a battery measurement. See "Why not WebGPU" above. |
 | Bridge canvas + texSubImage2D | Higher battery than texImage2D (pipeline barrier stalls) — rejected |
 | Pure rVFC drives RAF, **no continuous rAF loop** | ~60% battery increase vs baseline — rejected |
 | rVFC calls `present()` directly, **continuous rAF loop retained** | Confirmed good — current approach. Removes up to a vsync of latency at unchanged draw count. Not the same change as the row above. |
@@ -572,6 +594,63 @@ A minimal local notepad, opened from the guide item via `AndroidBridge.openNotes
 | `textureOffset` vs neighbor UV varyings | Same visual output, fewer varyings, no texelSize uniform — current approach |
 | preferMinimalPostProcessing | Real battery saving |
 | 60Hz display pin | Real battery saving |
+| CAS Normal vs CAS Off (**measured on Logitech G Cloud**, 2026-09-23) | 700 mA vs 617 mA → the whole CAS pipeline costs **~83 mA (~12% of total drain)**. One 60 s run per mode, ±30 mA noise. See "Power Profile" below. |
+
+### Power Profile — Logitech G Cloud (2026-09-23)
+
+**These numbers are specific to the Logitech G Cloud** (Adreno 618, Android 11, WebView
+151.0.7922.200, 1080p xCloud stream, Bluetooth A2DP audio, brightness ~92/255). Don't assume
+they carry over to other devices.
+
+**Method:** live battery current, not %/15min. `adb tcpip 5555` over USB, `adb connect <ip>:5555`,
+then unplug so the device is discharging (`dumpsys battery` → `status: 3`). Record a 60 s Perfetto trace
+with `android.power` (battery current, 1 s poll), ftrace sched / cpu_frequency / gpu_frequency, and
+process_stats. Analyze with trace_processor. Readable without root: `batt.current_ua`, `gpufreq`, and
+cpufreq. **Not** readable: sysfs `current_now` and kgsl `gpu_busy_percentage`. There is no per-rail
+power data, so screen and radio power can't be separated out.
+
+**Total while streaming: ~700 mA (~2.7 W).** CPU time as share of one core:
+
+| Area | ~% of a core | Notes |
+|------|--------------|-------|
+| Stream networking (`WebRTC_W_and_N`, `NetworkService`, IO threads) | ~48% | WebView WebRTC — every packet crosses renderer ↔ network service. Not reachable in-page. |
+| Audio (audio HAL `writer`, `FastMixer`, `AudioTrack`, `AudioOutputDevi`) | ~36% | Bluetooth A2DP path. Fixed cost; the user always uses Bluetooth. |
+| GPU thread + compositing (`Chrome_InProcGp`, `RenderThread`, `VizWebView`, SurfaceFlinger) | ~50% | CAS lives in `Chrome_InProcGp`. |
+| xCloud page JS (`CrRendererMain`, `DedicatedWorker`) | ~24% | Mostly xCloud's own code. |
+| Wi-Fi driver (`cds_ol_rx_thread`) | 13% | |
+| Logitech background apps (launcher, gamepad settings) | ~13% | Not ours. |
+
+**Where the CAS cost goes:** with CAS on, `Chrome_InProcGp` (WebView's in-process GPU thread) runs at
+16.5% of a core; with CAS off it drops to 2%. The **GPU clock stays at 267 MHz (lowest step) with CAS
+on or off** (brief 355 MHz bursts with CAS on). So the shader itself is effectively free. The cost is
+CPU time spent handling each frame's `drawImage` → `texImage2D` → `drawArrays` calls. **Don't spend
+effort optimizing shader ALU.** A pipeline change can only win by cutting that per-frame call
+overhead, and the ceiling is ~83 mA. The other ~88% of drain is the streaming stack, screen and radios.
+
+**Conclusion (user, 2026-09-23): the upscale/CAS method is not the battery problem.** Pipeline
+experiments are closed. Don't propose new render-pipeline changes for battery reasons; the most
+any of them could save is the ~83 mA above.
+
+### User-side battery settings (G Cloud, not code)
+
+These are device settings, not app changes. None of them were measured, except CAS Off (above).
+
+- **Screen brightness:** likely the single biggest draw. The G Cloud has an LCD, so dark content saves nothing.
+- **Wi-Fi:** 5 GHz with a strong signal. The Wi-Fi driver (`cds_ol_rx_thread`) used 13% of a core receiving the stream.
+- **Location → Wi-Fi scanning and Bluetooth scanning off; Nearby Share off:** logcat showed Nearby
+  doing Bluetooth scans during the stream.
+- **Discord toggle off when not needed:** off means no WebView, zero cost (see Discord section).
+- **Bluetooth audio:** the headphones were on **LDAC at 96 kHz / 32-bit**, with A2DP offload enabled.
+  The source is 48 kHz Opus, so the CPU upsamples for no fidelity gain. Audio used ~36% of a core.
+  - Developer options → sample rate 48 kHz and 16/24-bit: inaudible, but resets on reconnect/reboot
+    on Android 11. Apps can't set it (needs a privileged permission).
+  - Bluetooth device settings → **"HD Audio: LDAC" off**: persists per device, falls back to
+    AAC/SBC. Possibly a slight audible difference.
+  - Keep "Disable Bluetooth A2DP hardware offload" **unticked**.
+- **Keep off:** Disable HW overlays, Force 4x MSAA.
+- **Logger buffer sizes → Off:** `logd` used ~4.5% of a core, much of it driver log spam
+  (btaudio "Sink Latency", OMX "Unable to convey fps info"). This disables logcat.
+- **Battery Saver:** unmeasured. It may throttle CPU and hurt stream smoothness or latency.
 
 ---
 
