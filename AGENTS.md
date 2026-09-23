@@ -382,6 +382,12 @@ with a missing `outline: none` on section/container elements). **Do not narrow t
 
 ## Status Overlay
 
+**Native Quick Menu addition:** opening Stream Stats explicitly requests a WebGPU
+compatibility adapter once per page document and displays availability plus `shader-f16`
+support. Results (including failures) are cached; ordinary stats refreshes only read them.
+No GPU device, render pipeline, video import, or additional polling timer is created.
+This user-requested capability check does not restore the retired decoder diagnostics below.
+
 Battery percentage + local time, injected into `document.documentElement` when the guide panel is
 injected, removed when the IntersectionObserver sees the panel leave.
 
@@ -495,6 +501,13 @@ A minimal local notepad, opened from the guide item via `AndroidBridge.openNotes
 
 ## Android / Kotlin
 
+- **Controller dispatch when the main WebView has focus:** gamepad/joystick/D-pad key
+  events and joystick motion use normal Activity dispatch once. Explicit WebView-first
+  dispatch followed by Activity dispatch can deliver an unhandled event twice to the
+  focused WebView. Explicit forwarding remains when it lacks focus; Back and other
+  input retain their existing routes. No input throttling or axis changes. This is a
+  routing change, not a measured battery improvement; G Cloud control feel still needs
+  on-device verification.
 - **`preferMinimalPostProcessing = true`** — disables SurfaceFlinger HDR tone-mapping and display post-processing. Real battery saving.
 - **`preferredDisplayModeId` → 60Hz** — prevents display running at higher refresh rates for a 60fps stream. The candidate list is **filtered to the current mode's `physicalWidth`/`physicalHeight`** first: `supportedModes` can include 60Hz entries at a lower resolution, and picking one purely by refresh rate would silently downscale the panel.
 - **`LAYER_TYPE_NONE`** — WebView default. Do not change to `LAYER_TYPE_HARDWARE` (adds an extra off-screen compositing texture wrapping a WebView that already does its own GPU rendering)
