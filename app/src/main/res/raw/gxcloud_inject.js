@@ -15,7 +15,25 @@
     bridgeCtx.globalCompositeOperation = 'copy';
 
     const style = document.createElement('style');
-    style.textContent = '* { -webkit-tap-highlight-color: transparent !important; outline: none !important; }';
+    style.textContent =
+        '* { -webkit-tap-highlight-color: transparent !important; }' +
+        // An xCloud container on the home route is wider than this screen. Mobile
+        // Chromium widens the layout viewport to fit it, which drags every
+        // fixed-position start-0/end-0 bar (the title bar) wider too and leaves its
+        // end-side buttons off-screen behind a horizontal pan. Clipping x-overflow
+        // on the root keeps the layout viewport at screen width. Needed on html,
+        // not just body — Android Chromium ignores it on body alone.
+        'html, body { overflow-x: hidden !important; }' +
+        // Shell title-bar pill rings: the site draws them with a two-layer mask +
+        // mask-composite:subtract trick, which this WebView renders wrong (invisible
+        // or stretched past the button) because it assumes the desktop Chrome/Edge
+        // UA it's given implies full mask-* support. The gradient behind it is a
+        // single color stop, so an inset box-shadow is pixel-equivalent.
+        '[class~="mask-composite-subtract"][class~="rounded-pill"] {' +
+        ' -webkit-mask: none !important; mask: none !important;' +
+        ' background: none !important;' +
+        ' box-shadow: inset 0 0 0 var(--border-solid-padding, 2px) var(--border-solid-color, transparent) !important;' +
+        '}';
     document.head.appendChild(style);
 
     // Returns true once the toggle is hidden (or was already hidden), so callers
@@ -40,6 +58,9 @@
     // after a new one binds would leave the new one drawing through a 1x1 bridge —
     // on top of two stacked opaque canvases and two live GL contexts.
     let activeStreamVideo = null;
+    // Controlled by the native quick menu. Normal keeps the tuned production
+    // shader; High is deliberately compiled with its own constant.
+    let casMode = 'normal';
 
     // Full unbind: menu watch, CAS pipeline, and the binding marker, so the next
     // stream can bind even if xCloud re-uses the same <video> element.
@@ -51,6 +72,7 @@
     };
 
     const setupWebGLCAS = (video) => {
+        if (casMode === 'off') return;
         if (video.dataset.casSetup) return;
         video.dataset.casSetup = 'true';
 
@@ -80,8 +102,17 @@
         }
 
         const vert = '#version 300 es\nin vec4 position;\nout vec2 vUV;\nvoid main(){gl_Position=position;vUV=vec2(position.x*0.5+0.5,0.5-position.y*0.5);}';
-        const frag = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nin vec2 vUV;\nconst float sharpenFactor=0.37;\nout vec4 fragColor;\nvoid main(){\n  vec3 e=texture(data,vUV).rgb;\n  vec3 b=textureOffset(data,vUV,ivec2(0,1)).rgb;\n  vec3 d=textureOffset(data,vUV,ivec2(-1,0)).rgb;\n  vec3 f=textureOffset(data,vUV,ivec2(1,0)).rgb;\n  vec3 h=textureOffset(data,vUV,ivec2(0,-1)).rgb;\n  const vec3 lw=vec3(0.2126,0.7152,0.0722);\n  float le=dot(e,lw);float lb=dot(b,lw);float ld=dot(d,lw);float lf=dot(f,lw);float lh=dot(h,lw);\n  float mn_l=min(min(min(ld,le),min(lf,lb)),lh);\n  float mx_l=max(max(max(ld,le),max(lf,lb)),lh);\n  float amp=mn_l/(mx_l+0.01);\n  float wm=clamp((le-0.05)*2.2222,0.0,1.0);\n  float cg=clamp((mx_l-mn_l-0.005)*28.57,0.0,1.0);\n  float w=-(wm*cg)*(amp*0.2);\n  float rw=1.0/(4.0*w+1.0);\n  float detL=clamp(((lb+ld+lf+lh)*w+le)*rw,0.0,1.0)-le;\n  float satBoost=1.0+wm*0.18;\n  float sharpL=le+detL/(1.0+abs(detL)*4.0)*sharpenFactor*satBoost;\n  fragColor=vec4(clamp(vec3(sharpL)+(e-vec3(le))*satBoost,0.0,1.0),1.0);\n}';
+        // %SHARPEN_FACTOR% is substituted below, not string-replaced against a tuned
+        // literal — a future retune of the normal-mode constant can't silently break
+        // high mode by no longer matching the old text.
+        const fragTemplate = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nin vec2 vUV;\nconst float sharpenFactor=%SHARPEN_FACTOR%;\nout vec4 fragColor;\nvoid main(){\n  vec3 e=texture(data,vUV).rgb;\n  vec3 b=textureOffset(data,vUV,ivec2(0,1)).rgb;\n  vec3 d=textureOffset(data,vUV,ivec2(-1,0)).rgb;\n  vec3 f=textureOffset(data,vUV,ivec2(1,0)).rgb;\n  vec3 h=textureOffset(data,vUV,ivec2(0,-1)).rgb;\n  const vec3 lw=vec3(0.2126,0.7152,0.0722);\n  float le=dot(e,lw);float lb=dot(b,lw);float ld=dot(d,lw);float lf=dot(f,lw);float lh=dot(h,lw);\n  float mn_l=min(min(min(ld,le),min(lf,lb)),lh);\n  float mx_l=max(max(max(ld,le),max(lf,lb)),lh);\n  float amp=mn_l/(mx_l+0.01);\n  float wm=clamp((le-0.05)*2.2222,0.0,1.0);\n  float cg=clamp((mx_l-mn_l-0.005)*28.57,0.0,1.0);\n  float w=-(wm*cg)*(amp*0.2);\n  float rw=1.0/(4.0*w+1.0);\n  float detL=clamp(((lb+ld+lf+lh)*w+le)*rw,0.0,1.0)-le;\n  float satBoost=1.0+wm*0.18;\n  float sharpL=le+detL/(1.0+abs(detL)*4.0)*sharpenFactor*satBoost;\n  fragColor=vec4(clamp(vec3(sharpL)+(e-vec3(le))*satBoost,0.0,1.0),1.0);\n}';
 
+        const SHARPEN_FACTOR_NORMAL = '0.37';
+        const SHARPEN_FACTOR_HIGH = '1.0';
+        const fragSource = fragTemplate.replace(
+            '%SHARPEN_FACTOR%',
+            casMode === 'high' ? SHARPEN_FACTOR_HIGH : SHARPEN_FACTOR_NORMAL
+        );
         const mkShader = (type, src) => {
             const s = gl.createShader(type);
             gl.shaderSource(s, src);
@@ -95,7 +126,7 @@
 
         const prog = gl.createProgram();
         const vs = mkShader(gl.VERTEX_SHADER, vert);
-        const fs = mkShader(gl.FRAGMENT_SHADER, frag);
+        const fs = mkShader(gl.FRAGMENT_SHADER, fragSource);
         if (!vs || !fs) {
             abortSetup(gl, prog, [vs, fs]);
             return;
@@ -284,7 +315,14 @@
             e.preventDefault();
             detach();
         };
-        const onContextRestored = () => { setupWebGLCAS(video); };
+        // detach() (via onContextLost) leaves this listener attached, so a restore can
+        // arrive after this stream ended or another one bound. Rebuilding then would
+        // stack a second opaque canvas and GL context over the live stream.
+        const onContextRestored = () => {
+            if (activeStreamVideo === video && video.srcObject && document.contains(video)) {
+                setupWebGLCAS(video);
+            }
+        };
         canvas.addEventListener('webglcontextlost', onContextLost, false);
         canvas.addEventListener('webglcontextrestored', onContextRestored, false);
 
@@ -299,6 +337,65 @@
             canvas.removeEventListener('webglcontextrestored', onContextRestored, false);
             bridge.width = 1; bridge.height = 1;
             gl.getExtension('WEBGL_lose_context')?.loseContext();
+        };
+    };
+
+    window.__gxcloudSetCasMode = (mode) => {
+        const next = mode === 'off' || mode === 'high' ? mode : 'normal';
+        if (next === casMode) return;
+        casMode = next;
+        const video = activeStreamVideo;
+        if (!video) return;
+        // Cleanup restores direct video and releases the old context before a
+        // replacement pipeline is created, so mode changes cannot stack canvases.
+        if (video._casCleanup) video._casCleanup();
+        if (casMode !== 'off' && document.contains(video)) setupWebGLCAS(video);
+    };
+
+    // User-triggered capability check, cached for this document. The stats ticker
+    // only reads these strings; it never requests an adapter or creates a device.
+    let webGpuStatus = 'Not checked';
+    let webGpuShaderF16 = '--';
+    let webGpuCheckStarted = false;
+    window.__gxcloudCheckWebGpu = async () => {
+        if (webGpuCheckStarted) return;
+        webGpuCheckStarted = true;
+        webGpuStatus = 'Checking…';
+        try {
+            if (!navigator.gpu) {
+                webGpuStatus = 'API unavailable';
+                return;
+            }
+            const adapter = await navigator.gpu.requestAdapter({ featureLevel: 'compatibility' });
+            if (!adapter) {
+                webGpuStatus = 'No compatible adapter';
+                return;
+            }
+            webGpuShaderF16 = adapter.features.has('shader-f16') ? 'Available' : 'Unavailable';
+            webGpuStatus = 'Adapter available';
+        } catch (error) {
+            webGpuStatus = 'Error: ' + (error?.message || error?.name || 'Adapter request failed');
+        }
+    };
+
+    window.__gxcloudGetStreamStats = () => {
+        const video = activeStreamVideo;
+        const capabilities = { webGpuStatus, webGpuShaderF16 };
+        if (!video) return { state: 'No active stream', casMode, ...capabilities };
+        const quality = video.getVideoPlaybackQuality?.();
+        const total = quality?.totalVideoFrames ?? video.webkitDecodedFrameCount ?? '--';
+        const dropped = quality?.droppedVideoFrames ?? video.webkitDroppedFrameCount ?? '--';
+        const presented = typeof total === 'number' && typeof dropped === 'number'
+            ? Math.max(total - dropped, 0)
+            : '--';
+        return {
+            state: video.ended ? 'Ended' : video.paused ? 'Paused' : video.readyState >= 2 ? 'Playing' : 'Loading',
+            resolution: video.videoWidth && video.videoHeight ? video.videoWidth + '×' + video.videoHeight : '--',
+            totalFrames: String(total),
+            presentedFrames: String(presented),
+            droppedFrames: String(dropped),
+            casMode,
+            ...capabilities
         };
     };
 
@@ -389,149 +486,6 @@
     document.addEventListener('playing', onMediaReady, true);
     document.addEventListener('emptied', onMediaGone, true);
 
-    let discordEnabledJS = false;
-
-    const injectDiscordToggle = (panel) => {
-        if (panel.dataset.discordInjected || panel.dataset.discordPending) return;
-        const section = panel.querySelector('section[data-auto-focus="true"]');
-        if (!section) {
-            panel.dataset.discordPending = 'true';
-            let waitSafety;
-            const waitObserver = new MutationObserver(() => {
-                const s = panel.querySelector('section[data-auto-focus="true"]');
-                if (s) {
-                    waitObserver.disconnect();
-                    clearTimeout(waitSafety);
-                    delete panel.dataset.discordPending;
-                    injectDiscordToggle(panel);
-                }
-            });
-            waitObserver.observe(panel, { childList: true, subtree: true });
-            // Bounded like armJumpPanelWatch's safety net below — the section can
-            // fail to ever render (panel removed, upstream markup change), and
-            // without this the observer would watch the subtree forever.
-            waitSafety = setTimeout(() => {
-                waitObserver.disconnect();
-                delete panel.dataset.discordPending;
-            }, 3000);
-            return;
-        }
-        panel.dataset.discordInjected = 'true';
-        watchForJumpPanelRemoval(panel);
-
-        const buildNotesEl = () => {
-            const el = document.createElement('div');
-            el.id = '__notes-item';
-            el.style.cssText = 'display:flex;align-items:center;min-height:52px;padding:0 16px;gap:12px;cursor:pointer;';
-            el.innerHTML = '<svg style="width:20px;height:20px;flex-shrink:0;fill:#fff;" viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg><span style="flex:1;color:#fff;font-size:14px;">Notes</span>';
-            el.addEventListener('click', () => {
-                if (typeof AndroidBridge !== 'undefined') AndroidBridge.openNotes();
-            });
-            return el;
-        };
-
-        const buildToggleEl = () => {
-            const el = document.createElement('div');
-            el.id = '__discord-toggle-item';
-            el.style.cssText = 'display:flex;align-items:center;min-height:52px;padding:0 16px;gap:12px;cursor:pointer;';
-            el.innerHTML = '<svg style="width:20px;height:20px;flex-shrink:0;fill:#fff;" viewBox="0 0 127.14 96.36"><path d="M107.7 8.07A105.2 105.2 0 0 0 81.47 0a72.1 72.1 0 0 0-3.36 6.83 97.7 97.7 0 0 0-29.11 0A72.3 72.3 0 0 0 45.64 0a105.9 105.9 0 0 0-26.25 8.09C2.79 32.65-1.71 56.6.54 80.21a105.7 105.7 0 0 0 32.17 16.15 77.7 77.7 0 0 0 6.89-11.11 68.4 68.4 0 0 1-10.85-5.18l2.56-2a75.6 75.6 0 0 0 64.58 0l2.59 2a68.3 68.3 0 0 1-10.87 5.19 77 77 0 0 0 6.89 11.1 105.3 105.3 0 0 0 32.19-16.14c2.64-27.38-4.51-51.11-18.9-72.15ZM42.45 65.69C36.18 65.69 31 60 31 53s5-12.74 11.43-12.74S54 46 53.89 53s-5.05 12.69-11.44 12.69Zm42.24 0C78.41 65.69 73.25 60 73.25 53s5-12.74 11.44-12.74S96.23 46 96.12 53s-5 12.69-11.43 12.69Z"/></svg><span style="flex:1;color:#fff;font-size:14px;">Discord</span><span class="__dt-track" style="position:relative;display:inline-block;width:44px;height:24px;border-radius:12px;background:#555;flex-shrink:0;transition:background .2s;"><span class="__dt-thumb" style="position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;transition:transform .2s;"></span></span>';
-            const track = el.querySelector('.__dt-track');
-            const thumb = el.querySelector('.__dt-thumb');
-            track.style.background = discordEnabledJS ? '#5865F2' : '#555';
-            thumb.style.transform = discordEnabledJS ? 'translateX(20px)' : 'translateX(0)';
-            el.addEventListener('click', () => {
-                discordEnabledJS = !discordEnabledJS;
-                track.style.background = discordEnabledJS ? '#5865F2' : '#555';
-                thumb.style.transform = discordEnabledJS ? 'translateX(20px)' : 'translateX(0)';
-                if (typeof AndroidBridge !== 'undefined') AndroidBridge.setDiscordEnabled(discordEnabledJS);
-            });
-            return el;
-        };
-
-        // ID-guarded like the reinjector below: the panel can be re-injected after
-        // watchForJumpPanelRemoval clears the marker, and xCloud hides the guide
-        // rather than destroying it — so the section (and our rows) can still be
-        // there, which is how duplicate Notes/Discord entries appeared.
-        if (!section.querySelector('#__notes-item')) section.appendChild(buildNotesEl());
-        if (!section.querySelector('#__discord-toggle-item')) section.appendChild(buildToggleEl());
-
-        const buildStatusOverlay = () => {
-            let pct = '--';
-            try {
-                if (typeof AndroidBridge !== 'undefined') {
-                    const s = JSON.parse(AndroidBridge.getDeviceStatusJson());
-                    if (s.batteryPercent >= 0) pct = s.batteryPercent;
-                }
-            } catch(e) {}
-            const now = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }).format(new Date());
-            const video = activeStreamVideo || document.querySelector('video[data-gx-bound]');
-            const width = video?.videoWidth || 0;
-            const height = video?.videoHeight || 0;
-            const quality = video?.getVideoPlaybackQuality?.();
-            const decoded = quality?.totalVideoFrames ?? video?.webkitDecodedFrameCount ?? '--';
-            const dropped = quality?.droppedVideoFrames ?? video?.webkitDroppedFrameCount ?? '--';
-            const el = document.createElement('div');
-            el.id = '__gxcloud-status-overlay';
-            el.style.cssText = 'all:initial;position:fixed;top:5%;right:32px;pointer-events:none;display:flex;flex-direction:column;align-items:flex-end;gap:2px;z-index:2147483647;';
-            const line = (label, value, bold = false) => '<span style="all:initial;display:block;color:#fff;font:' + (bold ? '600 ' : '') + '15px/1.35 sans-serif;text-shadow:0 1px 4px rgba(0,0,0,.8);">' + label + ': ' + value + '</span>';
-            el.innerHTML = line('Battery', pct + '%', true) +
-                line('Time', now) +
-                line('Resolution', width && height ? width + '×' + height : '--') +
-                line('Decoded', decoded) +
-                line('Dropped', dropped);
-            return el;
-        };
-
-        document.getElementById('__gxcloud-status-overlay')?.remove();
-        document.documentElement.appendChild(buildStatusOverlay());
-
-        const reinjector = new MutationObserver(() => {
-            if (!section.querySelector('#__notes-item')) section.insertBefore(buildNotesEl(), section.querySelector('#__discord-toggle-item') || null);
-            if (!section.querySelector('#__discord-toggle-item')) section.appendChild(buildToggleEl());
-        });
-        reinjector.observe(section, { childList: true });
-        panel._discordReinjector = reinjector;
-    };
-
-    let jumpWatchArmed = false;
-    const armJumpPanelWatch = () => {
-        const tryInject = () => {
-            const panel = document.getElementById('guide-tabpanel-jump');
-            if (panel && !panel.dataset.discordInjected) {
-                injectDiscordToggle(panel);
-            }
-            return !!panel;
-        };
-        // Warm case: panel already in the DOM — inject with zero observer cost.
-        if (tryInject()) return;
-        if (jumpWatchArmed) return;
-        jumpWatchArmed = true;
-        // Cold case: wait for the panel to render (arbitrary streaming lag),
-        // then inject and disconnect. Bounded so it never runs continuously.
-        let safety;
-        const obs = new MutationObserver(() => {
-            if (tryInject()) { obs.disconnect(); clearTimeout(safety); jumpWatchArmed = false; }
-        });
-        obs.observe(document.documentElement, { childList: true, subtree: true });
-        safety = setTimeout(() => { obs.disconnect(); jumpWatchArmed = false; }, 3000);
-    };
-    window.__gxcloudProbeJumpPanel = armJumpPanelWatch;
-    const watchForJumpPanelRemoval = (panel) => {
-        const io = new IntersectionObserver((entries) => {
-            if (!entries[0].isIntersecting) {
-                io.disconnect();
-                if (panel._discordReinjector) { panel._discordReinjector.disconnect(); panel._discordReinjector = null; }
-                delete panel.dataset.discordInjected;
-                delete panel.dataset.discordPending;
-                // Remove the rows too, not just the marker. Leaving them behind is
-                // what let the next injection stack a second copy on top.
-                panel.querySelector('#__notes-item')?.remove();
-                panel.querySelector('#__discord-toggle-item')?.remove();
-                document.getElementById('__gxcloud-status-overlay')?.remove();
-            }
-        }, { threshold: 0 });
-        io.observe(panel);
-    };
     // Warm case: already streaming when the script runs (WebView restore, or
     // re-injection after a real navigation) — no play() call or media event is
     // coming, so neither hook above would ever fire.
