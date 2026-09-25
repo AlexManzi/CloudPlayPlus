@@ -94,6 +94,7 @@ class MainActivity : AppCompatActivity() {
             webView.importantForContentCapture = View.IMPORTANT_FOR_CONTENT_CAPTURE_NO
         }
         webView.isHapticFeedbackEnabled = false
+        webView.isSoundEffectsEnabled = false
         webView.isLongClickable = false
         webView.setOnHoverListener { _, _ -> true }
         webView.isSaveEnabled = false

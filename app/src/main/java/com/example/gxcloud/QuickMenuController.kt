@@ -40,11 +40,19 @@ class QuickMenuController(
     private val refreshRunnable = object : Runnable {
         override fun run() {
             refreshStats()
-            if (isVisible) handler.postDelayed(this, STATS_INTERVAL_MS)
+            scheduleRefresh()
         }
     }
 
     val isVisible: Boolean get() = container?.visibility == View.VISIBLE
+
+    private fun scheduleRefresh() {
+        handler.removeCallbacks(refreshRunnable)
+        if (isVisible) {
+            val interval = if (statsPage?.visibility == View.VISIBLE) STATS_INTERVAL_MS else HEADER_INTERVAL_MS
+            handler.postDelayed(refreshRunnable, interval)
+        }
+    }
 
     fun show() {
         if (container == null) inflate()
@@ -53,8 +61,7 @@ class QuickMenuController(
         updateDiscordLabel()
         resizePanel()
         refreshStats()
-        handler.removeCallbacks(refreshRunnable)
-        handler.postDelayed(refreshRunnable, STATS_INTERVAL_MS)
+        scheduleRefresh()
     }
 
     fun hide() {
@@ -64,16 +71,13 @@ class QuickMenuController(
 
     // isVisible alone doesn't account for the Activity being backgrounded — without
     // these, refreshRunnable keeps polling battery and poking the (paused) WebView via
-    // evaluateJavascript once a second the whole time the menu is left open behind Home.
+    // evaluateJavascript while the menu is left open behind Home.
     fun onPause() {
         handler.removeCallbacks(refreshRunnable)
     }
 
     fun onResume() {
-        if (isVisible) {
-            handler.removeCallbacks(refreshRunnable)
-            handler.postDelayed(refreshRunnable, STATS_INTERVAL_MS)
-        }
+        scheduleRefresh()
     }
 
     fun handleBack(): Boolean {
@@ -182,12 +186,14 @@ class QuickMenuController(
         title?.text = "Stream Stats"
         checkWebGpu()
         refreshStats()
+        scheduleRefresh()
     }
 
     private fun showMainPage() {
         mainPageViews.forEach { it.visibility = View.VISIBLE }
         statsPage?.visibility = View.GONE
         title?.text = "Quick Menu"
+        scheduleRefresh()
     }
 
     private fun refreshStats() {
@@ -233,6 +239,7 @@ class QuickMenuController(
 
     private companion object {
         const val PANEL_FRACTION = 0.80f
+        const val HEADER_INTERVAL_MS = 5_000L
         const val STATS_INTERVAL_MS = 1_000L
     }
 }
