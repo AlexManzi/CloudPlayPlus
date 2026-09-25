@@ -16,7 +16,7 @@
 
     const style = document.createElement('style');
     style.textContent =
-        '* { -webkit-tap-highlight-color: transparent !important; }' +
+        'html, body { -webkit-tap-highlight-color: transparent !important; }' +
         // An xCloud container on the home route is wider than this screen. Mobile
         // Chromium widens the layout viewport to fit it, which drags every
         // fixed-position start-0/end-0 bar (the title bar) wider too and leaves its

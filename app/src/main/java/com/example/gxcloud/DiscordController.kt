@@ -85,6 +85,7 @@ class DiscordController(
     }
 
     fun close() {
+        webView?.stopLoading()
         webView?.loadUrl("about:blank")
         webView?.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_WAIVED, true)
         container?.visibility = android.view.View.GONE
@@ -127,6 +128,7 @@ class DiscordController(
             view.isVerticalScrollBarEnabled = false
             view.isHorizontalScrollBarEnabled = false
             view.isHapticFeedbackEnabled = false
+            view.isSoundEffectsEnabled = false
             view.isLongClickable = false
             view.isSaveEnabled = false
             view.isSaveFromParentEnabled = false
@@ -166,7 +168,12 @@ class DiscordController(
             }
             view.webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView, url: String) {
-                    if (url == "about:blank") { view.clearHistory(); view.onPause() }
+                    // A fast reopen can finish the old blank navigation after open() resumes
+                    // this WebView. Do not pause the newly visible Discord session.
+                    if (url == "about:blank" && state == State.CLOSED) {
+                        view.clearHistory()
+                        view.onPause()
+                    }
                 }
             }
         }

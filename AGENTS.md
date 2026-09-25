@@ -595,6 +595,7 @@ A minimal local notepad, opened from the guide item via `AndroidBridge.openNotes
 | preferMinimalPostProcessing | Real battery saving |
 | 60Hz display pin | Real battery saving |
 | CAS Normal vs CAS Off (**measured on Logitech G Cloud**, 2026-09-23) | 700 mA vs 617 mA → the whole CAS pipeline costs **~83 mA (~12% of total drain)**. One 60 s run per mode, ±30 mA noise. See "Power Profile" below. |
+| Bluetooth LDAC 96 kHz/32-bit vs SBC 44.1 kHz/16-bit (**measured on Logitech G Cloud**, 2026-09-24, CAS Normal) | 700 vs 693 mA mean (685 vs 691 median) — **no difference**. Audio CPU unchanged. Keep LDAC. |
 
 ### Power Profile — Logitech G Cloud (2026-09-23)
 
@@ -640,16 +641,19 @@ These are device settings, not app changes. None of them were measured, except C
 - **Location → Wi-Fi scanning and Bluetooth scanning off; Nearby Share off:** logcat showed Nearby
   doing Bluetooth scans during the stream.
 - **Discord toggle off when not needed:** off means no WebView, zero cost (see Discord section).
-- **Bluetooth audio:** the headphones were on **LDAC at 96 kHz / 32-bit**, with A2DP offload enabled.
-  The source is 48 kHz Opus, so the CPU upsamples for no fidelity gain. Audio used ~36% of a core.
-  - Developer options → sample rate 48 kHz and 16/24-bit: inaudible, but resets on reconnect/reboot
-    on Android 11. Apps can't set it (needs a privileged permission).
-  - Bluetooth device settings → **"HD Audio: LDAC" off**: persists per device, falls back to
-    AAC/SBC. Possibly a slight audible difference.
+- **Bluetooth codec: no effect, keep LDAC.** Measured 2026-09-24. LDAC 96 kHz / 32-bit ran
+  700 mA mean / 685 median; SBC 44.1 kHz / 16-bit ("HD Audio" off) ran 693 mean / 691 median, which is
+  within noise. The audio threads were identical (`writer` 14%, `FastMixer` 9.6–9.7% of a core). The
+  ~36% audio CPU is a fixed cost of the Bluetooth A2DP path, not upsampling. The theory that the
+  96 kHz / 32-bit config was wasting CPU was **wrong**. Don't recommend lowering codec quality for battery.
   - Keep "Disable Bluetooth A2DP hardware offload" **unticked**.
 - **Keep off:** Disable HW overlays, Force 4x MSAA.
-- **Logger buffer sizes → Off:** `logd` used ~4.5% of a core, much of it driver log spam
-  (btaudio "Sink Latency", OMX "Unable to convey fps info"). This disables logcat.
+- **Logger buffer sizes → Off (set on the user's G Cloud, 2026-09-24):** `logd` used ~4.3% of a
+  core, all on the little cluster, much of it driver log spam (btaudio "Sink Latency", OMX "Unable
+  to convey fps info"). Estimated ~5–10 mA saved; not measured. This disables logcat.
+  **For device testing, it must be set back to 256K first** (Developer options → Logger buffer
+  sizes → 256K). Otherwise `adb logcat` is empty and crashes are invisible. Developer options must
+  stay on or the setting resets to the default.
 - **Battery Saver:** unmeasured. It may throttle CPU and hurt stream smoothness or latency.
 
 ---
