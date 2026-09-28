@@ -15,3 +15,7 @@
 local.properties
 # Added by code-review-graph
 .code-review-graph/
+
+# Local machine-specific config (contains absolute local paths)
+/.mcp.json
+/.claude/settings.json
