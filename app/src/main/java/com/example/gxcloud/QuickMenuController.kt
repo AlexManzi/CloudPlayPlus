@@ -16,9 +16,11 @@ import kotlin.math.roundToInt
 class QuickMenuController(
     private val stub: ViewStub,
     private val requestStats: ((String) -> Unit) -> Unit,
-    private val checkWebGpu: () -> Unit,
     private val setCasMode: (String) -> Unit,
     private val batteryPercent: () -> Int,
+    private val ramStatus: () -> String?,
+    private val thermalStatus: () -> String?,
+    private val wattage: () -> Double?,
     private val openNotes: () -> Unit,
     private val toggleDiscordEnabled: () -> Boolean,
     private val isDiscordEnabled: () -> Boolean
@@ -184,7 +186,6 @@ class QuickMenuController(
         mainPageViews.forEach { it.visibility = View.GONE }
         statsPage?.visibility = View.VISIBLE
         title?.text = "Stream Stats"
-        checkWebGpu()
         refreshStats()
         scheduleRefresh()
     }
@@ -220,15 +221,21 @@ class QuickMenuController(
                 val total = stats.optString("totalFrames", "--")
                 val presented = stats.optString("presentedFrames", "--")
                 val state = stats.optString("state", "No active stream")
+                // System CPU% and GPU clock/busy% are not shown: confirmed on this device
+                // that neither has a readable data source without root (/proc/stat has been
+                // blocked to third-party apps since Android 7; the kgsl sysfs files were
+                // denied even to adb shell). See AGENTS.md "Power Profile".
+                val ram = ramStatus() ?: "--"
+                val thermal = thermalStatus() ?: "--"
+                val watts = wattage()?.let { String.format("%.1f W", it) } ?: "--"
                 val text = "Resolution      $resolution\n" +
                     "Playback state  $state\n" +
                     "Total frames    $total\n" +
                     "Dropped frames  $presented\n" +
                     "CAS mode        ${casMode.replaceFirstChar { it.uppercase() }}\n" +
-                    "WebGPU compat   ${stats.optString("webGpuStatus", "Not checked")}\n" +
-                    "Shader FP16     ${stats.optString("webGpuShaderF16", "--")}\n" +
-                    "Battery         $battery\n" +
-                    "Local time      $time"
+                    "RAM used        $ram\n" +
+                    "Thermal status  $thermal\n" +
+                    "Power draw      $watts"
                 if (fullStatsText?.text != text) fullStatsText?.text = text
             } catch (_: Exception) {
                 val fallback = "No active stream statistics available."

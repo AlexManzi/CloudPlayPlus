@@ -352,36 +352,9 @@
         if (casMode !== 'off' && document.contains(video)) setupWebGLCAS(video);
     };
 
-    // User-triggered capability check, cached for this document. The stats ticker
-    // only reads these strings; it never requests an adapter or creates a device.
-    let webGpuStatus = 'Not checked';
-    let webGpuShaderF16 = '--';
-    let webGpuCheckStarted = false;
-    window.__gxcloudCheckWebGpu = async () => {
-        if (webGpuCheckStarted) return;
-        webGpuCheckStarted = true;
-        webGpuStatus = 'Checking…';
-        try {
-            if (!navigator.gpu) {
-                webGpuStatus = 'API unavailable';
-                return;
-            }
-            const adapter = await navigator.gpu.requestAdapter({ featureLevel: 'compatibility' });
-            if (!adapter) {
-                webGpuStatus = 'No compatible adapter';
-                return;
-            }
-            webGpuShaderF16 = adapter.features.has('shader-f16') ? 'Available' : 'Unavailable';
-            webGpuStatus = 'Adapter available';
-        } catch (error) {
-            webGpuStatus = 'Error: ' + (error?.message || error?.name || 'Adapter request failed');
-        }
-    };
-
     window.__gxcloudGetStreamStats = () => {
         const video = activeStreamVideo;
-        const capabilities = { webGpuStatus, webGpuShaderF16 };
-        if (!video) return { state: 'No active stream', casMode, ...capabilities };
+        if (!video) return { state: 'No active stream', casMode };
         const quality = video.getVideoPlaybackQuality?.();
         const total = quality?.totalVideoFrames ?? video.webkitDecodedFrameCount ?? '--';
         const dropped = quality?.droppedVideoFrames ?? video.webkitDroppedFrameCount ?? '--';
@@ -394,8 +367,7 @@
             totalFrames: String(total),
             presentedFrames: String(presented),
             droppedFrames: String(dropped),
-            casMode,
-            ...capabilities
+            casMode
         };
     };
 

@@ -1,7 +1,10 @@
 package com.example.gxcloud
 
 import android.annotation.SuppressLint
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.BatteryManager
+import android.os.PowerManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
@@ -138,12 +141,6 @@ class MainActivity : AppCompatActivity() {
                     callback
                 )
             },
-            checkWebGpu = {
-                webView.evaluateJavascript(
-                    "window.__gxcloudCheckWebGpu&&window.__gxcloudCheckWebGpu();void 0",
-                    null
-                )
-            },
             setCasMode = { mode ->
                 webView.evaluateJavascript("window.__gxcloudSetCasMode&&window.__gxcloudSetCasMode('$mode')", null)
             },
@@ -151,6 +148,9 @@ class MainActivity : AppCompatActivity() {
                 val bm = getSystemService(BATTERY_SERVICE) as BatteryManager
                 bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
             },
+            ramStatus = { readRamStatus() },
+            thermalStatus = { readThermalStatus() },
+            wattage = { readWattage() },
             openNotes = { notesController.show() },
             toggleDiscordEnabled = {
                 val enabled = !discordController.enabled
@@ -287,6 +287,69 @@ class MainActivity : AppCompatActivity() {
             return super.dispatchGenericMotionEvent(event)
         }
         return webView.dispatchGenericMotionEvent(event) || super.dispatchGenericMotionEvent(event)
+    }
+
+    // System-wide RAM: ActivityManager's own memory-pressure API, public since API 16
+    // with no permission needed — unlike /proc/stat (blocked for apps since Android 7,
+    // confirmed on this device: see AGENTS.md "Power Profile") and the kgsl GPU files
+    // (blocked even for adb shell), this one was never a restricted path, so it always
+    // has a real reading.
+    private fun readRamStatus(): String? {
+        return try {
+            val am = getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager
+            val info = android.app.ActivityManager.MemoryInfo()
+            am.getMemoryInfo(info)
+            if (info.totalMem <= 0) return null
+            val usedBytes = info.totalMem - info.availMem
+            val usedPercent = (100 * usedBytes / info.totalMem).toInt()
+            val usedGb = usedBytes / 1_073_741824.0
+            val totalGb = info.totalMem / 1_073_741824.0
+            String.format("%.1f/%.1f GB (%d%%)", usedGb, totalGb, usedPercent)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    // Android's own thermal-throttling verdict, computed from the device's real thermal
+    // sensors — the officially supported way to ask "is this device under stress," unlike
+    // the CPU%/GPU% paths that turned out to be blocked. Public API since Android 10
+    // (API 29); minSdk here is 26, so guarded for 26-28 where the API doesn't exist yet.
+    private fun readThermalStatus(): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+        return try {
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            when (pm.currentThermalStatus) {
+                PowerManager.THERMAL_STATUS_NONE -> "Normal"
+                PowerManager.THERMAL_STATUS_LIGHT -> "Light"
+                PowerManager.THERMAL_STATUS_MODERATE -> "Moderate"
+                PowerManager.THERMAL_STATUS_SEVERE -> "Severe"
+                PowerManager.THERMAL_STATUS_CRITICAL -> "Critical"
+                PowerManager.THERMAL_STATUS_EMERGENCY -> "Emergency"
+                PowerManager.THERMAL_STATUS_SHUTDOWN -> "Shutdown"
+                else -> null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    // Instantaneous power draw in watts: BatteryManager's CURRENT_NOW (microamps) times
+    // the voltage from the sticky ACTION_BATTERY_CHANGED intent (millivolts). Both are
+    // public framework APIs backed by the battery HAL — a different path than the raw
+    // kgsl/power_supply sysfs nodes that require root, so this can still work even where
+    // those are blocked. Returns null if either reading is missing/unsupported on this device.
+    private fun readWattage(): Double? {
+        return try {
+            val bm = getSystemService(BATTERY_SERVICE) as BatteryManager
+            val microAmps = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
+            if (microAmps == Int.MIN_VALUE || microAmps == 0) return null
+            val batteryStatus = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            val milliVolts = batteryStatus?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1) ?: -1
+            if (milliVolts <= 0) return null
+            (abs(microAmps) / 1_000_000.0) * (milliVolts / 1000.0)
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun setupBackHandler() {
