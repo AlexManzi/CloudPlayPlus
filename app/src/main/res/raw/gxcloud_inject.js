@@ -60,15 +60,72 @@
     let activeStreamVideo = null;
     // Controlled by the native quick menu. Normal keeps the tuned production
     // shader; High is deliberately compiled with its own constant.
-    let casMode = 'normal';
+    const initialCasMode = window.__gxcloudInitialCasMode;
+    let casMode = initialCasMode === 'off' || initialCasMode === 'high' ? initialCasMode : 'normal';
 
     // Full unbind: menu watch, CAS pipeline, and the binding marker, so the next
     // stream can bind even if xCloud re-uses the same <video> element.
     const teardown = (video) => {
+        if (video._gxBindingCleanup) video._gxBindingCleanup();
+        if (video._gxOffCleanup) video._gxOffCleanup();
         if (video._gxMenuCleanup) video._gxMenuCleanup();
         if (video._casCleanup) video._casCleanup();
         delete video.dataset.gxBound;
         if (activeStreamVideo === video) activeStreamVideo = null;
+    };
+
+    // CAS Off (and failed/lost GL setup) still owns a stream binding. Watch only
+    // direct child removals along its ancestor chain; no steady-state polling and
+    // no permanent subtree observer. CAS's existing rAF/watchdog takes over on success.
+    const watchWithoutCAS = (video) => {
+        if (video._gxOffCleanup || !video._gxBindingCleanup || video._casCleanup) return;
+        const binding = video._gxBindingCleanup;
+        let attachmentTimer = null;
+        let ancestors = [];
+        const isCurrent = () => activeStreamVideo === video && video._gxBindingCleanup === binding;
+        const cleanup = () => {
+            observer.disconnect();
+            clearTimeout(attachmentTimer);
+            attachmentTimer = null;
+            ancestors = [];
+            if (video._gxOffCleanup === cleanup) delete video._gxOffCleanup;
+        };
+        const observeAncestors = () => {
+            const next = [];
+            for (let parent = video.parentNode; parent; parent = parent.parentNode) next.push(parent);
+            if (next.length === ancestors.length && next.every((node, i) => node === ancestors[i])) return;
+            observer.disconnect();
+            ancestors = next;
+            for (const parent of ancestors) observer.observe(parent, { childList: true });
+        };
+        const observer = new MutationObserver(() => {
+            if (!isCurrent()) { cleanup(); return; }
+            // While waiting for first attachment, unrelated page mutations are harmless.
+            if (attachmentTimer !== null) {
+                if (!document.contains(video)) return;
+                clearTimeout(attachmentTimer);
+                attachmentTimer = null;
+                observeAncestors();
+            }
+            if (!video.srcObject || !document.contains(video) || video.ended) {
+                teardown(video);
+                return;
+            }
+            observeAncestors();
+        });
+        video._gxOffCleanup = cleanup;
+        if (document.contains(video)) {
+            observeAncestors();
+        } else {
+            // play() can be called before React attaches the video. Bound this cold
+            // watch, then let a later play/metadata/playing event retry acquisition.
+            attachmentTimer = setTimeout(() => {
+                attachmentTimer = null;
+                if (isCurrent()) teardown(video);
+                else cleanup();
+            }, 3000);
+            observer.observe(document.documentElement, { childList: true, subtree: true });
+        }
     };
 
     const setupWebGLCAS = (video) => {
@@ -281,14 +338,8 @@
         };
 
         const onVisibility = () => { if (document.hidden) cancelFrame(); else scheduleFrame(); };
-        // Bound on the element, not document capture: once xCloud unmounts the
-        // <video> these still fire, whereas the document-level 'emptied' listener
-        // never sees an event from a detached node.
-        const onStreamEnd = () => teardown(video);
         video.addEventListener('pause', cancelFrame);
         video.addEventListener('play', scheduleFrame);
-        video.addEventListener('ended', onStreamEnd);
-        video.addEventListener('error', onStreamEnd);
         document.addEventListener('visibilitychange', onVisibility);
         scheduleFrame();
 
@@ -299,8 +350,6 @@
             stopWatchdog();
             video.removeEventListener('pause', cancelFrame);
             video.removeEventListener('play', scheduleFrame);
-            video.removeEventListener('ended', onStreamEnd);
-            video.removeEventListener('error', onStreamEnd);
             document.removeEventListener('visibilitychange', onVisibility);
             video.removeEventListener('loadedmetadata', _syncSize);
             video.removeEventListener('resize', _syncSize);
@@ -314,6 +363,7 @@
         const onContextLost = (e) => {
             e.preventDefault();
             detach();
+            watchWithoutCAS(video);
         };
         // detach() (via onContextLost) leaves this listener attached, so a restore can
         // arrive after this stream ended or another one bound. Rebuilding then would
@@ -338,6 +388,7 @@
             bridge.width = 1; bridge.height = 1;
             gl.getExtension('WEBGL_lose_context')?.loseContext();
         };
+        if (video._gxOffCleanup) video._gxOffCleanup();
     };
 
     window.__gxcloudSetCasMode = (mode) => {
@@ -349,6 +400,7 @@
         // Cleanup restores direct video and releases the old context before a
         // replacement pipeline is created, so mode changes cannot stack canvases.
         if (video._casCleanup) video._casCleanup();
+        watchWithoutCAS(video);
         if (casMode !== 'off' && document.contains(video)) setupWebGLCAS(video);
     };
 
@@ -378,6 +430,23 @@
         if (activeStreamVideo && activeStreamVideo !== video) teardown(activeStreamVideo);
         video.dataset.gxBound = 'true';
         activeStreamVideo = video;
+
+        // Binding lifetime is independent of sharpening. Element-bound events
+        // still reach us after detachment and survive mode changes/context loss.
+        const onStreamEnd = () => {
+            if (video._gxBindingCleanup === cleanupBinding) teardown(video);
+        };
+        const cleanupBinding = () => {
+            video.removeEventListener('ended', onStreamEnd);
+            video.removeEventListener('error', onStreamEnd);
+            video.removeEventListener('emptied', onStreamEnd);
+            if (video._gxBindingCleanup === cleanupBinding) delete video._gxBindingCleanup;
+        };
+        video._gxBindingCleanup = cleanupBinding;
+        video.addEventListener('ended', onStreamEnd);
+        video.addEventListener('error', onStreamEnd);
+        video.addEventListener('emptied', onStreamEnd);
+        watchWithoutCAS(video);
 
         // xCloud renders the quick-actions toggle in the same commit as the video,
         // so it is normally already in the DOM — check synchronously first. A

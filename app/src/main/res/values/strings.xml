@@ -1,3 +1,6 @@
 <resources>
     <string name="app_name">xCloud+</string>
+    <string name="webview_retry">Retry</string>
+    <string name="xbox_connection_lost">Xbox connection lost</string>
+    <string name="discord_connection_lost">Discord connection lost</string>
 </resources>

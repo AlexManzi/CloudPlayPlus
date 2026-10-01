@@ -20,6 +20,11 @@ import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.RenderProcessGoneDetail
+import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.TextView
+import org.json.JSONObject
 import androidx.activity.addCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
@@ -27,7 +32,12 @@ import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var webView: WebView
+    private var webView: WebView? = null
+    private lateinit var webViewContainer: FrameLayout
+    private var recoveryView: View? = null
+    private var documentGeneration = 0L
+    private var casMode = "normal"
+    private var resumed = false
     private lateinit var discordController: DiscordController
     private lateinit var notesController: NotesController
     private lateinit var quickMenuController: QuickMenuController
@@ -39,6 +49,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
         super.onCreate(savedInstanceState)
+        casMode = normalizeCasMode(savedInstanceState?.getString("casMode"))
 
         // Keep screen on while gaming
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -80,31 +91,80 @@ class MainActivity : AppCompatActivity() {
             .setWillPauseWhenDucked(false)
             .build()
 
+        webViewContainer = findViewById(R.id.mainWebViewContainer)
         webView = findViewById(R.id.webview)
 
-        webView.overScrollMode = View.OVER_SCROLL_NEVER
-        webView.isVerticalScrollBarEnabled = false
-        webView.isHorizontalScrollBarEnabled = false
-        webView.isFocusableInTouchMode = true
-        webView.requestFocus()
-        webView.setBackgroundColor(android.graphics.Color.BLACK)
+        discordController = DiscordController(this, findViewById(R.id.discordStub))
+        notesController = NotesController(this, findViewById(R.id.notesStub))
+        quickMenuController = QuickMenuController(
+            stub = findViewById(R.id.quickMenuStub),
+            requestStats = { callback ->
+                val view = webView
+                val generation = documentGeneration
+                if (view == null) {
+                    val stats = JSONObject().put("state", "Stream unavailable").put("casMode", casMode)
+                    callback(JSONObject.quote(stats.toString()))
+                } else {
+                    view.evaluateJavascript(
+                        "JSON.stringify(window.__gxcloudGetStreamStats ? window.__gxcloudGetStreamStats() : null)"
+                    ) { raw ->
+                        if (view === webView && generation == documentGeneration) callback(raw)
+                    }
+                }
+            },
+            setCasMode = { mode ->
+                casMode = normalizeCasMode(mode)
+                webView?.evaluateJavascript("window.__gxcloudSetCasMode&&window.__gxcloudSetCasMode('$casMode')", null)
+            },
+            getCasMode = { casMode },
+            batteryPercent = {
+                val bm = getSystemService(BATTERY_SERVICE) as BatteryManager
+                bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+            },
+            ramStatus = { readRamStatus() },
+            thermalStatus = { readThermalStatus() },
+            wattage = { readWattage() },
+            openNotes = { notesController.show() },
+            toggleDiscordEnabled = {
+                val enabled = !discordController.enabled
+                discordController.enabled = enabled
+                // Turning the feature off must also release an already-open Discord
+                // WebView; when on, the existing four-tap gesture is the only opener.
+                if (!enabled && discordController.isVisible) discordController.close()
+                enabled
+            },
+            isDiscordEnabled = { discordController.enabled }
+        )
+        configureWebView(webView!!)
+        setupBackHandler()
+        webView?.loadUrl(XBOX_URL)
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun configureWebView(view: WebView) {
+        view.overScrollMode = View.OVER_SCROLL_NEVER
+        view.isVerticalScrollBarEnabled = false
+        view.isHorizontalScrollBarEnabled = false
+        view.isFocusableInTouchMode = true
+        view.requestFocus()
+        view.setBackgroundColor(android.graphics.Color.BLACK)
         window.setBackgroundDrawable(null)
-        webView.setLayerType(View.LAYER_TYPE_NONE, null)
-        webView.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
-        webView.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        view.setLayerType(View.LAYER_TYPE_NONE, null)
+        view.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
+        view.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
         // ContentCapture is API 30+; minSdk is 26.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            webView.importantForContentCapture = View.IMPORTANT_FOR_CONTENT_CAPTURE_NO
+            view.importantForContentCapture = View.IMPORTANT_FOR_CONTENT_CAPTURE_NO
         }
-        webView.isHapticFeedbackEnabled = false
-        webView.isSoundEffectsEnabled = false
-        webView.isLongClickable = false
-        webView.setOnHoverListener { _, _ -> true }
-        webView.isSaveEnabled = false
-        webView.isSaveFromParentEnabled = false
+        view.isHapticFeedbackEnabled = false
+        view.isSoundEffectsEnabled = false
+        view.isLongClickable = false
+        view.setOnHoverListener { _, _ -> true }
+        view.isSaveEnabled = false
+        view.isSaveFromParentEnabled = false
 
         // WebView settings
-        webView.settings.apply {
+        view.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
             mediaPlaybackRequiresUserGesture = false
@@ -129,68 +189,90 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Allow cookies
-        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
+        CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
 
-        discordController = DiscordController(this, findViewById(R.id.discordStub))
-        notesController = NotesController(this, findViewById(R.id.notesStub))
-        quickMenuController = QuickMenuController(
-            stub = findViewById(R.id.quickMenuStub),
-            requestStats = { callback ->
-                webView.evaluateJavascript(
-                    "JSON.stringify(window.__gxcloudGetStreamStats ? window.__gxcloudGetStreamStats() : null)",
-                    callback
-                )
-            },
-            setCasMode = { mode ->
-                webView.evaluateJavascript("window.__gxcloudSetCasMode&&window.__gxcloudSetCasMode('$mode')", null)
-            },
-            batteryPercent = {
-                val bm = getSystemService(BATTERY_SERVICE) as BatteryManager
-                bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
-            },
-            ramStatus = { readRamStatus() },
-            thermalStatus = { readThermalStatus() },
-            wattage = { readWattage() },
-            openNotes = { notesController.show() },
-            toggleDiscordEnabled = {
-                val enabled = !discordController.enabled
-                discordController.enabled = enabled
-                // Turning the feature off must also release an already-open Discord
-                // WebView; when on, the existing four-tap gesture is the only opener.
-                if (!enabled && discordController.isVisible) discordController.close()
-                enabled
-            },
-            isDiscordEnabled = { discordController.enabled }
-        )
-        webView.webChromeClient = WebChromeClient()
+        view.webChromeClient = WebChromeClient()
+        view.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                if (view === webView) documentGeneration++
+            }
 
-        webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
-                if (url == view.url) view.evaluateJavascript(injectScript, null)
+                if (view === webView && url == view.url) {
+                    // Supply the selection before the script's warm stream acquisition.
+                    view.evaluateJavascript("window.__gxcloudInitialCasMode='$casMode';\n" + injectScript, null)
+                }
+            }
+
+            override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                if (view === webView) {
+                    webView = null
+                    documentGeneration++
+                    showRecovery()
+                }
+                // Each affected WebView handles its own callback, even for a shared renderer.
+                (view.parent as? ViewGroup)?.removeView(view)
+                view.destroy()
+                return true
             }
         }
+    }
 
-        setupBackHandler()
-        webView.loadUrl("https://play.xbox.com/")
+    private fun showRecovery() {
+        if (recoveryView != null) return
+        val recovery = layoutInflater.inflate(R.layout.layout_webview_recovery, webViewContainer, false)
+        recovery.findViewById<TextView>(R.id.recoveryMessage).setText(R.string.xbox_connection_lost)
+        recovery.findViewById<Button>(R.id.recoveryRetry).setOnClickListener {
+            if (webView != null || !resumed) return@setOnClickListener
+            val replacement = WebView(this)
+            replacement.id = R.id.webview
+            webView = replacement
+            documentGeneration++
+            configureWebView(replacement)
+            webViewContainer.removeView(recovery)
+            recoveryView = null
+            webViewContainer.addView(replacement, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+            ))
+            replacement.resumeTimers()
+            replacement.onResume()
+            replacement.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+            replacement.loadUrl(XBOX_URL)
+            if (!quickMenuController.isVisible && !notesController.isVisible) replacement.requestFocus()
+        }
+        recoveryView = recovery
+        webViewContainer.addView(recovery)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("casMode", casMode)
+        super.onSaveInstanceState(outState)
+    }
+
+    private fun normalizeCasMode(mode: String?): String = when (mode) {
+        "off", "high" -> mode
+        else -> "normal"
     }
 
     override fun onResume() {
         super.onResume()
-        webView.resumeTimers()
-        webView.onResume()
-        webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+        resumed = true
+        webView?.resumeTimers()
+        webView?.onResume()
+        webView?.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
         discordController.onResume()
         quickMenuController.onResume()
         audioManager.requestAudioFocus(audioFocusRequest)
     }
 
     override fun onPause() {
+        resumed = false
         super.onPause()
         if (notesController.isVisible) notesController.forceSave()
-        webView.onPause()
-        webView.pauseTimers()
-        webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_WAIVED, true)
+        webView?.onPause()
+        webView?.pauseTimers()
+        webView?.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_WAIVED, true)
         discordController.onPause()
         quickMenuController.onPause()
         audioManager.abandonAudioFocusRequest(audioFocusRequest)
@@ -200,10 +282,14 @@ class MainActivity : AppCompatActivity() {
         quickMenuController.destroy()
         notesController.destroy()
         discordController.destroy()
-        webView.webViewClient = WebViewClient()
-        webView.webChromeClient = null
-        (webView.parent as? ViewGroup)?.removeView(webView)
-        webView.destroy()
+        webView?.let { view ->
+            view.webViewClient = WebViewClient()
+            view.webChromeClient = null
+            (view.parent as? ViewGroup)?.removeView(view)
+            view.destroy()
+        }
+        webView = null
+        documentGeneration++
         super.onDestroy()
     }
 
@@ -222,8 +308,8 @@ class MainActivity : AppCompatActivity() {
         if (hasFocus) {
             // xCloud only polls the gamepad for page navigation while its window has
             // focus (document.hasFocus()); without it, focus highlights never appear.
-            if (!quickMenuController.isVisible && !notesController.isVisible && !webView.hasFocus()) {
-                webView.requestFocus()
+            if (!quickMenuController.isVisible && !notesController.isVisible && webView?.hasFocus() == false) {
+                webView?.requestFocus()
             }
             @Suppress("DEPRECATION")
             window.decorView.systemUiVisibility = (
@@ -234,16 +320,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // Back is delegated unchanged to AndroidX's callback registered in setupBackHandler.
+    @SuppressLint("GestureBackNavigation")
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.keyCode == KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
         // Normal dispatch already reaches the focused WebView. Forwarding first can
         // deliver an unhandled controller event to it twice through the fallback.
-        if (webView.hasFocus() && (
+        if (webView?.hasFocus() == true && (
                     event.isFromSource(InputDevice.SOURCE_GAMEPAD) ||
                     event.isFromSource(InputDevice.SOURCE_JOYSTICK) ||
                     event.isFromSource(InputDevice.SOURCE_DPAD)
                 )) return super.dispatchKeyEvent(event)
-        return webView.dispatchKeyEvent(event) || super.dispatchKeyEvent(event)
+        return webView?.dispatchKeyEvent(event) == true || super.dispatchKeyEvent(event)
     }
 
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
@@ -267,7 +355,7 @@ class MainActivity : AppCompatActivity() {
                         // a stale touch sequence alive behind the native overlay.
                         MotionEvent.obtain(ev).also { cancel ->
                             cancel.action = MotionEvent.ACTION_CANCEL
-                            webView.dispatchTouchEvent(cancel)
+                            webView?.dispatchTouchEvent(cancel)
                             cancel.recycle()
                         }
                         suppressQuickMenuGesture = true
@@ -283,10 +371,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
         // Keep explicit forwarding when another view owns focus (e.g. an overlay).
-        if (webView.hasFocus() && event.isFromSource(InputDevice.SOURCE_JOYSTICK)) {
+        if (webView?.hasFocus() == true && event.isFromSource(InputDevice.SOURCE_JOYSTICK)) {
             return super.dispatchGenericMotionEvent(event)
         }
-        return webView.dispatchGenericMotionEvent(event) || super.dispatchGenericMotionEvent(event)
+        return webView?.dispatchGenericMotionEvent(event) == true || super.dispatchGenericMotionEvent(event)
     }
 
     // System-wide RAM: ActivityManager's own memory-pressure API, public since API 16
@@ -357,7 +445,7 @@ class MainActivity : AppCompatActivity() {
             when {
                 quickMenuController.isVisible -> if (!quickMenuController.handleBack()) quickMenuController.hide()
                 notesController.isVisible -> notesController.hide()
-                webView.canGoBack() -> webView.goBack()
+                webView?.canGoBack() == true -> webView?.goBack()
             }
         }
     }
@@ -366,6 +454,7 @@ class MainActivity : AppCompatActivity() {
     private var suppressQuickMenuGesture = false
 
     private companion object {
+        const val XBOX_URL = "https://play.xbox.com/"
         const val QUICK_MENU_FINGERS = 4
         const val QUICK_MENU_GESTURE_WINDOW_MS = 300L
     }
