@@ -17,6 +17,7 @@ class QuickMenuController(
     private val stub: ViewStub,
     private val requestStats: ((String) -> Unit) -> Unit,
     private val setCasMode: (String) -> Unit,
+    private val getCasMode: () -> String,
     private val batteryPercent: () -> Int,
     private val ramStatus: () -> String?,
     private val thermalStatus: () -> String?,
@@ -34,11 +35,10 @@ class QuickMenuController(
     private var title: TextView? = null
     private var fullStatsText: TextView? = null
     private var statsPage: View? = null
-    private val mainPageViews = mutableListOf<View>()
+    private var mainPage: View? = null
     private val casButtons = mutableMapOf<String, Button>()
     private val handler = Handler(Looper.getMainLooper())
     private val timeFormat = DateFormat.getTimeInstance(DateFormat.SHORT)
-    private var casMode = "normal"
     private val refreshRunnable = object : Runnable {
         override fun run() {
             refreshStats()
@@ -61,6 +61,7 @@ class QuickMenuController(
         showMainPage()
         container!!.visibility = View.VISIBLE
         updateDiscordLabel()
+        updateCasSelection()
         resizePanel()
         refreshStats()
         scheduleRefresh()
@@ -107,6 +108,7 @@ class QuickMenuController(
         title = root.findViewById(R.id.quickMenuTitle)
         fullStatsText = root.findViewById(R.id.quickMenuFullStats)
         statsPage = root.findViewById(R.id.quickMenuStatsPage)
+        mainPage = root.findViewById(R.id.quickMenuMainPage)
 
         root.setOnClickListener { hide() }
         panel!!.setOnClickListener { /* Consume backdrop clicks that land on the panel. */ }
@@ -129,21 +131,11 @@ class QuickMenuController(
             root.findViewById<Button>(id).also { button ->
                 casButtons[mode] = button
                 button.setOnClickListener {
-                    casMode = mode
-                    updateCasSelection()
                     setCasMode(mode)
+                    updateCasSelection()
                 }
             }
         }
-        mainPageViews += listOf(
-            root.findViewById(R.id.quickMenuNotes),
-            root.findViewById(R.id.quickMenuDiscord),
-            root.findViewById(R.id.quickMenuDivider),
-            root.findViewById(R.id.quickMenuCasHeading),
-            root.findViewById(R.id.quickMenuStatsCard),
-            root.findViewById(R.id.quickMenuFooter),
-            root.findViewById<Button>(R.id.quickMenuCasOff).parent as View
-        )
         root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> resizePanel() }
         updateCasSelection()
     }
@@ -166,6 +158,7 @@ class QuickMenuController(
     }
 
     private fun updateCasSelection() {
+        val casMode = getCasMode()
         casButtons.forEach { (mode, button) ->
             val selected = mode == casMode
             button.isSelected = selected
@@ -178,12 +171,14 @@ class QuickMenuController(
 
     private fun updateDiscordLabel() {
         val enabled = isDiscordEnabled()
-        discordTitle?.text = if (enabled) "Turn Off Discord" else "Turn On Discord"
-        discordSubtitle?.text = if (enabled) "Four-tap Discord shortcut is enabled" else "Enable the four-tap Discord shortcut"
+        val title = if (enabled) "Turn Off Discord" else "Turn On Discord"
+        val subtitle = if (enabled) "Four-tap Discord shortcut is enabled" else "Enable the four-tap Discord shortcut"
+        if (discordTitle?.text != title) discordTitle?.text = title
+        if (discordSubtitle?.text != subtitle) discordSubtitle?.text = subtitle
     }
 
     private fun showStatsPage() {
-        mainPageViews.forEach { it.visibility = View.GONE }
+        mainPage?.visibility = View.GONE
         statsPage?.visibility = View.VISIBLE
         title?.text = "Stream Stats"
         refreshStats()
@@ -191,7 +186,7 @@ class QuickMenuController(
     }
 
     private fun showMainPage() {
-        mainPageViews.forEach { it.visibility = View.VISIBLE }
+        mainPage?.visibility = View.VISIBLE
         statsPage?.visibility = View.GONE
         title?.text = "Quick Menu"
         scheduleRefresh()
@@ -212,11 +207,8 @@ class QuickMenuController(
             try {
                 val value = JSONTokener(raw).nextValue() as? String ?: return@requestStats
                 val stats = org.json.JSONObject(value)
-                val newCasMode = stats.optString("casMode", casMode)
-                if (newCasMode != casMode) {
-                    casMode = newCasMode
-                    updateCasSelection()
-                }
+                // Native selection is authoritative; an older document cannot reset it.
+                val casMode = getCasMode()
                 val resolution = stats.optString("resolution", "--")
                 val total = stats.optString("totalFrames", "--")
                 val presented = stats.optString("presentedFrames", "--")
@@ -231,7 +223,7 @@ class QuickMenuController(
                 val text = "Resolution      $resolution\n" +
                     "Playback state  $state\n" +
                     "Total frames    $total\n" +
-                    "Dropped frames  $presented\n" +
+                    "Presented frames $presented\n" +
                     "CAS mode        ${casMode.replaceFirstChar { it.uppercase() }}\n" +
                     "RAM used        $ram\n" +
                     "Thermal status  $thermal\n" +

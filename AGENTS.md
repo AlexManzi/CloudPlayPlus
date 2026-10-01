@@ -5,6 +5,49 @@ was tried and rejected. Read this before suggesting changes.
 
 ---
 
+## WebView lifecycle update — 2026-09-29
+
+These entries supersede the older lifecycle/menu descriptions below. The measured video
+upload, shader, direct rVFC draw, continuous CAS rAF loop, and renderer priority policies are unchanged.
+
+- **CAS selection is native state.** `MainActivity` owns Off/Normal/High, saves it in Activity
+  instance state, and supplies `window.__gxcloudInitialCasMode` before each document's injected
+  script starts. Fresh launches default to Normal. The quick menu reads native selection;
+  stats from an older document cannot replace it. This also applies to a WebView rebuilt after
+  renderer loss. No storage write or periodic synchronization was added.
+- **Stream binding survives CAS mode changes.** Element-bound `ended`, `error`, and `emptied`
+  listeners belong to `foundVideo`, not the GL pipeline. Full `teardown` removes them, the
+  quick-actions watch/retries, any CAS resources, and the active-video reference. Existing CAS
+  rAF liveness checks and the stopped-loop watchdog remain in place.
+- **Off and unavailable CAS have independent removal detection.** One MutationObserver watches
+  only `childList` on the video's ancestor chain and refreshes those targets after reparenting.
+  There is no steady-state subtree observer or liveness timer. Detached acquisition may use a
+  temporary document-element subtree observer for at most 3 seconds; attachment narrows the
+  watch immediately, while expiry tears down the binding so later acquisition events can retry.
+  Successful CAS setup disconnects this watch; context loss reinstates it while direct video
+  remains visible. Do not replace this with a permanent document subtree observer.
+- **Discord labels compare text before assignment.** Header/stats refresh intervals remain
+  unchanged; unchanged label values do not trigger redundant text assignments.
+- **Both WebViews handle `onRenderProcessGone`.** Each callback detaches/destroys only its
+  reported view and returns true, including when views share a renderer. Native references
+  become null, pending Xbox JS results are invalidated, and lifecycle/input/stats calls tolerate
+  an unavailable view. Recovery cannot preserve a live stream whose renderer has died.
+- **Recovery is explicit.** Xbox shows a Retry action that creates a configured replacement and
+  loads the Xbox dashboard. Visible Discord shows Retry within its existing panel bounds;
+  closed Discord is recreated on the next explicit open. No automatic reload occurs. Notes,
+  Discord enablement, and native CAS selection survive renderer loss. Taps inside Discord's
+  recovery panel are excluded from its four-tap gesture just like taps inside its WebView.
+- **Timer handling remains global.** Either alive WebView can resume/pause timers during Activity
+  lifecycle changes, and retry resumes timers even if both previous views died while backgrounded.
+- **Current UI is the native quick menu.** The old guide injection, status overlay, and
+  `StreamBridge` descriptions are historical; those components are absent from this checkout.
+  The previously listed Discord permission and blank-navigation races are already fixed.
+- **Validation:** `node --test app/src/test/js/gxcloud_inject.test.cjs` (Node 18+) exercises
+  Off cleanup, ancestor removal/reparenting, detached acquisition, mode changes, GL failure/loss,
+  and document initialization. Battery savings and renderer crash recovery still require device
+  measurement/validation; this change does not claim measured power improvements.
+
+
 ## Device
 
 **Logitech G Cloud** — Snapdragon 720G, Adreno 618, Android, API 26+, targetSdk 36.
@@ -660,16 +703,10 @@ These are device settings, not app changes. None of them were measured, except C
 
 ## Open Issues
 
-Both verified still present in the current code.
-
-- **Discord mic permission race.** `openDiscord()` calls `requestPermissions` then immediately
-  calls `loadUrl` without waiting for the result, and there is no `onRequestPermissionsResult`
-  override. On first use, Discord loads before mic is granted — voice is broken until app restart.
-  Fix: defer `loadUrl` until the permission result arrives.
-- **Discord close→open freeze.** `onPageFinished("about:blank")` calls `view.onPause()`
-  unconditionally. A fast close→reopen can race with `onResume()` from `openDiscord()` and leave the
-  WebView frozen. Fix: check `discordState` inside `onPageFinished` before calling `onPause()`.
-- **Hardcoded status-overlay timezone** — `America/New_York`, see Status Overlay above. Cosmetic.
+- On-device renderer-loss recovery and battery comparison for the 2026-09-29 changes remain
+  unverified. Enable the device's Logger buffer before any logcat-based crash testing.
+- The previous Discord microphone permission race and close-to-open blank navigation race
+  are fixed in the current controller. The retired guide overlay no longer has a timezone issue.
 
 ---
 
