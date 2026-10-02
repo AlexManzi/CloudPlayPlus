@@ -404,9 +404,164 @@
         if (casMode !== 'off' && document.contains(video)) setupWebGLCAS(video);
     };
 
+    // Prefer IPv6. xCloud and Remote Play hand the client the server's ICE
+    // candidates in the JSON-encoded `exchangeResponse` of a GET .../sessions/
+    // {cloud|home}/{id}/ice. Re-ranking those candidates so every IPv6 one outranks
+    // every IPv4 one makes the controlling side (this client) nominate an IPv6 pair
+    // whenever one connects. IPv4 candidates are kept at low priority, so a network
+    // without working IPv6 still connects over IPv4 — only the preference changes.
+    // Takes effect when a stream connects; toggling mid-stream changes nothing
+    // until the next one.
+    //
+    // Same endpoint, payload and json()/text() override as Better xCloud's
+    // patchIceCandidates (src/utils/network.ts). Two deliberate differences: with
+    // the toggle off the exchange is left byte-for-byte untouched (Better xCloud
+    // always renumbers), and every IPv6 candidate outranks IPv4 rather than only
+    // the first candidate getting the top priority.
+    let preferIpv6 = window.__gxcloudInitialPreferIpv6 === true;
+    // IPv6 candidates available to the last stream, or null before any stream.
+    let serverIpv6Candidates = null;
+    // Remote Play only: the console's own IPv6 address from the session's
+    // configuration response. The ICE exchange doesn't necessarily list it, so —
+    // like Better xCloud's XhomeInterceptor.handleConfiguration — it is added as a
+    // candidate, here only while Prefer IPv6 is on.
+    let consoleIpv6 = null;
+    const ICE_URL = /\/sessions\/(cloud|home)\/[^/?#]+\/ice(?:[?#]|$)/;
+    const CONSOLE_CONFIG_URL = /\/sessions\/home\/[^/?#]+\/configuration(?:[?#]|$)/;
+    // Better xCloud also tries 9002 alongside the advertised port.
+    const CONSOLE_DEFAULT_PORT = 9002;
+    const MAX_ICE_PRIORITY = 2130706431;
+    const IPV4_FALLBACK_PRIORITY = 1000;
+
+    const readConsoleAddress = (config) => {
+        const details = config?.serverDetails;
+        const address = typeof details?.ipV6Address === 'string' && details.ipV6Address.includes(':')
+            ? details.ipV6Address : null;
+        consoleIpv6 = address
+            ? { address, ports: [...new Set([details.ipV6Port, CONSOLE_DEFAULT_PORT].filter(Number.isInteger))] }
+            : null;
+    };
+
+    // Candidate line: "a=candidate:<foundation> <component> <transport> <priority>
+    // <address> <port> typ ...". Lines that don't parse pass through untouched.
+    const parseCandidate = (entry) => {
+        const parts = typeof entry?.candidate === 'string' ? entry.candidate.split(' ') : null;
+        const valid = !!parts && parts.length > 5 && parts[0].startsWith('a=candidate:') && /^\d+$/.test(parts[3]);
+        return { entry, parts, valid, ipv6: valid && parts[4].includes(':') };
+    };
+
+    const rankIceCandidates = (candidates, consoleAddr) => {
+        const parsed = candidates.map(parseCandidate);
+        const known = new Set(parsed.filter(p => p.valid).map(p => p.parts[4].toLowerCase() + ' ' + p.parts[5]));
+        const template = parsed.find(p => p.valid)?.entry ?? { messageType: 'iceCandidate', sdpMLineIndex: '0', sdpMid: '0' };
+        const added = (consoleAddr?.ports ?? [])
+            .filter(port => !known.has(consoleAddr.address.toLowerCase() + ' ' + port))
+            .map((port, i) => parseCandidate({
+                ...template,
+                candidate: `a=candidate:${candidates.length + i + 1} 1 UDP 1 ${consoleAddr.address} ${port} typ host`
+            }));
+        serverIpv6Candidates = parsed.filter(p => p.ipv6).length + added.length;
+        if (!preferIpv6 || !serverIpv6Candidates) return null;
+        // New candidates go before a=end-of-candidates, which must stay last.
+        const end = parsed.findIndex(p => p.entry?.candidate === 'a=end-of-candidates');
+        parsed.splice(end < 0 ? parsed.length : end, 0, ...added);
+        const byPriority = (a, b) => Number(b.parts[3]) - Number(a.parts[3]);
+        parsed.filter(p => p.ipv6).sort(byPriority)
+            .forEach((p, i) => { p.parts[3] = String(MAX_ICE_PRIORITY - i); });
+        parsed.filter(p => p.valid && !p.ipv6).sort(byPriority)
+            .forEach((p, i) => { p.parts[3] = String(Math.max(1, IPV4_FALLBACK_PRIORITY - i)); });
+        return parsed.map(p => p.valid ? { ...p.entry, candidate: p.parts.join(' ') } : p.entry);
+    };
+
+    // Overrides json()/text() on the original Response rather than building a new
+    // one, so status, headers and url stay exactly what xCloud's client expects.
+    const rewriteIceResponse = async (response, consoleAddr) => {
+        if (!response.ok) return response;
+        const body = await response.clone().json();
+        if (typeof body?.exchangeResponse !== 'string') return response;
+        const candidates = JSON.parse(body.exchangeResponse);
+        if (!Array.isArray(candidates)) return response;
+        const ranked = rankIceCandidates(candidates, consoleAddr);
+        if (!ranked) return response;
+        body.exchangeResponse = JSON.stringify(ranked);
+        const text = JSON.stringify(body);
+        response.json = () => Promise.resolve(JSON.parse(text));
+        response.text = () => Promise.resolve(text);
+        return response;
+    };
+
+    const nativeFetch = window.fetch;
+    if (typeof nativeFetch === 'function') {
+        window.fetch = function(input, init) {
+            const result = nativeFetch.apply(this, arguments);
+            const url = typeof input === 'string' ? input : input?.url ?? String(input);
+            const method = String(init?.method ?? input?.method ?? 'GET').toUpperCase();
+            if (method !== 'GET') return result;
+            if (CONSOLE_CONFIG_URL.test(url)) {
+                // Observe only. Cloned before this returns, so it never races xCloud's read.
+                result.then(response => response.ok ? response.clone().json() : null)
+                    .then(readConsoleAddress, () => { consoleIpv6 = null; });
+                return result;
+            }
+            const ice = ICE_URL.exec(url);
+            if (!ice) return result;
+            // Any parse failure (204 while the server is still gathering, a schema
+            // change) hands xCloud the untouched response.
+            return result.then(response =>
+                rewriteIceResponse(response, ice[1] === 'home' ? consoleIpv6 : null).catch(() => response));
+        };
+    }
+
+    window.__gxcloudSetPreferIpv6 = (enabled) => { preferIpv6 = enabled === true; };
+
+    // Which path the live stream actually took. Only the newest peer connection is
+    // kept — xCloud makes one per stream. getStats() is async and the stats page
+    // polls synchronously, so each poll starts a refresh and reports the previous
+    // one (at most one poll interval stale). Nothing runs unless the page asks.
+    let streamPeerConnection = null;
+    let connectionPath = null;
+    let connectionPathPending = false;
+    const NativePeerConnection = window.RTCPeerConnection;
+    if (typeof NativePeerConnection === 'function') {
+        window.RTCPeerConnection = class RTCPeerConnection extends NativePeerConnection {
+            constructor(...args) {
+                super(...args);
+                streamPeerConnection = this;
+                connectionPath = null;
+            }
+        };
+    }
+
+    const describePath = (stats) => {
+        let pairId = null;
+        const reports = new Map();
+        stats.forEach(stat => {
+            reports.set(stat.id, stat);
+            if (stat.type === 'transport' && stat.selectedCandidatePairId) pairId = stat.selectedCandidatePairId;
+        });
+        const pair = reports.get(pairId);
+        const remote = reports.get(pair?.remoteCandidateId);
+        const local = reports.get(pair?.localCandidateId);
+        const address = remote?.address ?? remote?.ip;
+        if (typeof address !== 'string') return null;
+        const relayed = remote.candidateType === 'relay' || local?.candidateType === 'relay';
+        return (address.includes(':') ? 'IPv6' : 'IPv4') + (relayed ? ' (relay)' : ' (direct)');
+    };
+
+    const refreshConnectionPath = () => {
+        const pc = streamPeerConnection;
+        if (!pc || connectionPathPending) return;
+        if (pc.connectionState === 'closed') { connectionPath = null; return; }
+        connectionPathPending = true;
+        pc.getStats().then(stats => {
+            if (pc === streamPeerConnection) connectionPath = describePath(stats);
+        }, () => {}).finally(() => { connectionPathPending = false; });
+    };
+
     window.__gxcloudGetStreamStats = () => {
+        refreshConnectionPath();
         const video = activeStreamVideo;
-        if (!video) return { state: 'No active stream', casMode };
+        if (!video) return { state: 'No active stream', casMode, serverIpv6Candidates, connectionPath };
         const quality = video.getVideoPlaybackQuality?.();
         const total = quality?.totalVideoFrames ?? video.webkitDecodedFrameCount ?? '--';
         const dropped = quality?.droppedVideoFrames ?? video.webkitDroppedFrameCount ?? '--';
@@ -419,7 +574,9 @@
             totalFrames: String(total),
             presentedFrames: String(presented),
             droppedFrames: String(dropped),
-            casMode
+            casMode,
+            serverIpv6Candidates,
+            connectionPath
         };
     };
 

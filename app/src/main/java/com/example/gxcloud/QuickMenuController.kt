@@ -24,13 +24,16 @@ class QuickMenuController(
     private val wattage: () -> Double?,
     private val openNotes: () -> Unit,
     private val toggleDiscordEnabled: () -> Boolean,
-    private val isDiscordEnabled: () -> Boolean
+    private val isDiscordEnabled: () -> Boolean,
+    private val togglePreferIpv6: () -> Boolean,
+    private val isPreferIpv6: () -> Boolean
 ) {
     private var container: FrameLayout? = null
     private var panel: View? = null
     private var discordCard: View? = null
     private var discordTitle: TextView? = null
     private var discordSubtitle: TextView? = null
+    private var ipv6State: TextView? = null
     private var headerStatus: TextView? = null
     private var title: TextView? = null
     private var fullStatsText: TextView? = null
@@ -109,6 +112,7 @@ class QuickMenuController(
         fullStatsText = root.findViewById(R.id.quickMenuFullStats)
         statsPage = root.findViewById(R.id.quickMenuStatsPage)
         mainPage = root.findViewById(R.id.quickMenuMainPage)
+        ipv6State = root.findViewById(R.id.quickMenuIpv6State)
 
         root.setOnClickListener { hide() }
         panel!!.setOnClickListener { /* Consume backdrop clicks that land on the panel. */ }
@@ -123,6 +127,10 @@ class QuickMenuController(
         }
         root.findViewById<View>(R.id.quickMenuStatsCard).setOnClickListener { showStatsPage() }
         root.findViewById<Button>(R.id.quickMenuStatsBack).setOnClickListener { showMainPage() }
+        root.findViewById<View>(R.id.quickMenuIpv6).setOnClickListener {
+            togglePreferIpv6()
+            updateIpv6State()
+        }
         mapOf(
             "off" to R.id.quickMenuCasOff,
             "normal" to R.id.quickMenuCasNormal,
@@ -177,10 +185,20 @@ class QuickMenuController(
         if (discordSubtitle?.text != subtitle) discordSubtitle?.text = subtitle
     }
 
+    private fun updateIpv6State() {
+        val enabled = isPreferIpv6()
+        ipv6State?.text = if (enabled) "On" else "Off"
+        ipv6State?.setTextColor(if (enabled) Color.WHITE else Color.rgb(210, 210, 210))
+        ipv6State?.setBackgroundResource(
+            if (enabled) R.drawable.quick_menu_segment_selected else R.drawable.quick_menu_segment
+        )
+    }
+
     private fun showStatsPage() {
         mainPage?.visibility = View.GONE
         statsPage?.visibility = View.VISIBLE
         title?.text = "Stream Stats"
+        updateIpv6State()
         refreshStats()
         scheduleRefresh()
     }
@@ -220,6 +238,15 @@ class QuickMenuController(
                 val ram = ramStatus() ?: "--"
                 val thermal = thermalStatus() ?: "--"
                 val watts = wattage()?.let { String.format("%.1f W", it) } ?: "--"
+                // Count of IPv6 candidates the server offered in its last ICE response;
+                // null until a stream has connected in this document.
+                val serverIpv6 = when (val count = stats.opt("serverIpv6Candidates")) {
+                    is Int -> if (count > 0) "$count offered" else "None offered"
+                    else -> "--"
+                }
+                // Address family and direct/relay of the selected ICE pair. One poll
+                // behind (getStats is async), so "--" for the first second of the page.
+                val connection = stats.opt("connectionPath") as? String ?: "--"
                 val text = "Resolution      $resolution\n" +
                     "Playback state  $state\n" +
                     "Total frames    $total\n" +
@@ -227,7 +254,9 @@ class QuickMenuController(
                     "CAS mode        ${casMode.replaceFirstChar { it.uppercase() }}\n" +
                     "RAM used        $ram\n" +
                     "Thermal status  $thermal\n" +
-                    "Power draw      $watts"
+                    "Power draw      $watts\n" +
+                    "Server IPv6     $serverIpv6\n" +
+                    "Connection      $connection"
                 if (fullStatsText?.text != text) fullStatsText?.text = text
             } catch (_: Exception) {
                 val fallback = "No active stream statistics available."
