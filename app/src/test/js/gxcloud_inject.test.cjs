@@ -8,7 +8,7 @@ const source = readFileSync(resolve(__dirname, '../../main/res/raw/gxcloud_injec
 
 // A small browser harness exercises the injected script's public entry points.
 // Mutation delivery is deferred, as in the browser, so reparenting is atomic.
-function browser(mode = 'off', { attached = true, webgl = true } = {}) {
+function browser(mode = 'off', { attached = true, webgl = true, fetch, preferIpv6, RTCPeerConnection } = {}) {
     const observers = new Set();
     const pending = new Set();
     const timers = new Map();
@@ -121,7 +121,7 @@ function browser(mode = 'off', { attached = true, webgl = true } = {}) {
     streamContainer.dataset.testid = 'media-container';
     const video = streamContainer.appendChild(new Video());
     if (attached) document.body.appendChild(streamContainer);
-    const window = { __gxcloudInitialCasMode: mode };
+    const window = { __gxcloudInitialCasMode: mode, __gxcloudInitialPreferIpv6: preferIpv6, fetch, RTCPeerConnection };
     runInNewContext(source, {
         window, document, HTMLMediaElement: Video, HTMLVideoElement: Video,
         MutationObserver: Observer,
@@ -313,4 +313,116 @@ test('a stale terminal callback cannot retire a replacement binding on the same 
     assert.equal(b.video.dataset.gxBound, 'true');
     assert.equal(b.canvases().length, 1);
     assert.equal(b.video.listeners.get('ended').size, 1);
+});
+
+// Minimal Response stand-in: clone() reads the same body, as a real clone would.
+function iceResponse(candidates, { ok = true } = {}) {
+    const text = JSON.stringify({ exchangeResponse: JSON.stringify(candidates) });
+    const response = {
+        ok,
+        url: 'https://example.test/v5/sessions/home/ABC/ice',
+        json: () => Promise.resolve(JSON.parse(text)),
+        text: () => Promise.resolve(text),
+        clone: () => ({ json: () => Promise.resolve(JSON.parse(text)) })
+    };
+    return response;
+}
+const serverCandidates = () => [
+    { candidate: 'a=candidate:1 1 UDP 2130706431 20.1.2.3 9002 typ host', messageType: 'iceCandidate', sdpMLineIndex: '0', sdpMid: '0' },
+    { candidate: 'a=candidate:2 1 UDP 1 2603:1030::5 9002 typ host', messageType: 'iceCandidate', sdpMLineIndex: '0', sdpMid: '0' },
+    { candidate: 'a=end-of-candidates', messageType: 'iceCandidate', sdpMLineIndex: '0', sdpMid: '0' }
+];
+const priorities = async (response) => JSON.parse((await response.json()).exchangeResponse)
+    .map(c => c.candidate.split(' ').slice(3, 6).join(' '));
+
+test('Prefer IPv6 ranks every server IPv6 candidate above IPv4 and keeps IPv4 as fallback', async () => {
+    const b = browser('off', { preferIpv6: true, fetch: () => Promise.resolve(iceResponse(serverCandidates())) });
+    const response = await b.window.fetch('https://example.test/v5/sessions/home/ABC/ice');
+    assert.deepEqual(await priorities(response), ['1000 20.1.2.3 9002', '2130706431 2603:1030::5 9002', '']);
+    assert.equal(JSON.parse((await response.json()).exchangeResponse)[2].candidate, 'a=end-of-candidates');
+    assert.equal(b.window.__gxcloudGetStreamStats().serverIpv6Candidates, 1);
+});
+
+test('Prefer IPv6 off, or toggled off at runtime, leaves the ICE exchange untouched', async () => {
+    const b = browser('off', { preferIpv6: true, fetch: () => Promise.resolve(iceResponse(serverCandidates())) });
+    b.window.__gxcloudSetPreferIpv6(false);
+    const response = await b.window.fetch('https://example.test/v5/sessions/cloud/ABC/ice');
+    assert.deepEqual(await priorities(response), ['2130706431 20.1.2.3 9002', '1 2603:1030::5 9002', '']);
+    // Still observed, so the stats page can say whether IPv6 was on offer.
+    assert.equal(b.window.__gxcloudGetStreamStats().serverIpv6Candidates, 1);
+});
+
+test('Prefer IPv6 ignores non-ICE requests, POSTs, failures and unparseable bodies', async () => {
+    const sent = [];
+    const bad = { ok: true, clone: () => ({ json: () => Promise.reject(new Error('204')) }) };
+    const b = browser('off', { preferIpv6: true, fetch: (url) => { sent.push(url); return Promise.resolve(url.endsWith('/bad/ice') ? bad : iceResponse(serverCandidates())); } });
+    const other = await b.window.fetch('https://example.test/v5/sessions/home/ABC/sdp');
+    assert.deepEqual(await priorities(other), ['2130706431 20.1.2.3 9002', '1 2603:1030::5 9002', '']);
+    const post = await b.window.fetch('https://example.test/v5/sessions/home/ABC/ice', { method: 'POST' });
+    assert.deepEqual(await priorities(post), ['2130706431 20.1.2.3 9002', '1 2603:1030::5 9002', '']);
+    assert.equal(await b.window.fetch('https://example.test/v5/sessions/home/bad/ice'), bad);
+    assert.equal(sent.length, 3);
+});
+
+// Serves a Remote Play configuration (console address) and ICE exchange.
+function remotePlayFetch(serverDetails, candidates = serverCandidates()) {
+    return (url) => Promise.resolve(url.endsWith('/configuration')
+        ? { ok: true, clone: () => ({ json: () => Promise.resolve({ serverDetails }) }) }
+        : iceResponse(candidates));
+}
+const settle = () => new Promise(resolve => setImmediate(resolve));
+
+test('Remote Play adds the console IPv6 address before end-of-candidates, only when on and not already listed', async () => {
+    const details = { ipV4Address: '98.1.2.3', ipV4Port: 9002, ipV6Address: '2601:aa::7', ipV6Port: 1234 };
+    const on = browser('off', { preferIpv6: true, fetch: remotePlayFetch(details) });
+    await on.window.fetch('https://example.test/v5/sessions/home/ABC/configuration');
+    await settle();
+    const response = await on.window.fetch('https://example.test/v5/sessions/home/ABC/ice');
+    assert.deepEqual(await priorities(response), [
+        '1000 20.1.2.3 9002', '2130706431 2603:1030::5 9002',
+        '2130706430 2601:aa::7 1234', '2130706429 2601:aa::7 9002', ''
+    ]);
+    assert.equal(on.window.__gxcloudGetStreamStats().serverIpv6Candidates, 3);
+
+    // A cloud session never receives a Remote Play console's address.
+    const cloud = await on.window.fetch('https://example.test/v5/sessions/cloud/ABC/ice');
+    assert.equal((await priorities(cloud)).length, 3);
+
+    const off = browser('off', { preferIpv6: false, fetch: remotePlayFetch(details) });
+    await off.window.fetch('https://example.test/v5/sessions/home/ABC/configuration');
+    await settle();
+    const untouched = await off.window.fetch('https://example.test/v5/sessions/home/ABC/ice');
+    assert.deepEqual(await priorities(untouched), ['2130706431 20.1.2.3 9002', '1 2603:1030::5 9002', '']);
+    assert.equal(off.window.__gxcloudGetStreamStats().serverIpv6Candidates, 3);
+
+    const listed = browser('off', { preferIpv6: true, fetch: remotePlayFetch({ ipV6Address: '2603:1030::5', ipV6Port: 9002 }) });
+    await listed.window.fetch('https://example.test/v5/sessions/home/ABC/configuration');
+    await settle();
+    const deduped = await listed.window.fetch('https://example.test/v5/sessions/home/ABC/ice');
+    assert.equal((await priorities(deduped)).length, 3);
+});
+
+test('stats report the selected pair as IPv4/IPv6 and direct/relay, one poll behind', async () => {
+    let report = [];
+    class PeerConnection {
+        constructor() { this.connectionState = 'connected'; }
+        getStats() { return Promise.resolve(new Map(report.map(stat => [stat.id, stat]))); }
+    }
+    const b = browser('off', { RTCPeerConnection: PeerConnection });
+    assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, null);
+    const pc = new b.window.RTCPeerConnection();
+    assert.ok(pc instanceof PeerConnection);
+    report = [
+        { id: 'T', type: 'transport', selectedCandidatePairId: 'P' },
+        { id: 'P', type: 'candidate-pair', localCandidateId: 'L', remoteCandidateId: 'R' },
+        { id: 'L', type: 'local-candidate', candidateType: 'host' },
+        { id: 'R', type: 'remote-candidate', candidateType: 'host', address: '2603:1030::5' }
+    ];
+    assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, null);
+    await settle();
+    assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv6 (direct)');
+    report[2].candidateType = 'relay';
+    report[3].address = '20.1.2.3';
+    await settle();
+    assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv4 (relay)');
 });

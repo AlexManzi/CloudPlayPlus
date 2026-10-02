@@ -37,6 +37,10 @@ class MainActivity : AppCompatActivity() {
     private var recoveryView: View? = null
     private var documentGeneration = 0L
     private var casMode = "normal"
+    // Persisted, unlike casMode: it's a property of the user's networks, not a
+    // per-session look, so it should survive an app restart.
+    private var preferIpv6 = false
+    private val prefs by lazy { getSharedPreferences(PREFS_NAME, MODE_PRIVATE) }
     private var resumed = false
     private lateinit var discordController: DiscordController
     private lateinit var notesController: NotesController
@@ -50,6 +54,7 @@ class MainActivity : AppCompatActivity() {
         AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
         super.onCreate(savedInstanceState)
         casMode = normalizeCasMode(savedInstanceState?.getString("casMode"))
+        preferIpv6 = prefs.getBoolean(PREF_PREFER_IPV6, false)
 
         // Keep screen on while gaming
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -133,7 +138,14 @@ class MainActivity : AppCompatActivity() {
                 if (!enabled && discordController.isVisible) discordController.close()
                 enabled
             },
-            isDiscordEnabled = { discordController.enabled }
+            isDiscordEnabled = { discordController.enabled },
+            togglePreferIpv6 = {
+                preferIpv6 = !preferIpv6
+                prefs.edit().putBoolean(PREF_PREFER_IPV6, preferIpv6).apply()
+                webView?.evaluateJavascript("window.__gxcloudSetPreferIpv6&&window.__gxcloudSetPreferIpv6($preferIpv6)", null)
+                preferIpv6
+            },
+            isPreferIpv6 = { preferIpv6 }
         )
         configureWebView(webView!!)
         setupBackHandler()
@@ -200,8 +212,11 @@ class MainActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
                 if (view === webView && url == view.url) {
-                    // Supply the selection before the script's warm stream acquisition.
-                    view.evaluateJavascript("window.__gxcloudInitialCasMode='$casMode';\n" + injectScript, null)
+                    // Supply the selections before the script's warm stream acquisition.
+                    view.evaluateJavascript(
+                        "window.__gxcloudInitialCasMode='$casMode';window.__gxcloudInitialPreferIpv6=$preferIpv6;\n" + injectScript,
+                        null
+                    )
                 }
             }
 
@@ -457,6 +472,8 @@ class MainActivity : AppCompatActivity() {
         const val XBOX_URL = "https://play.xbox.com/"
         const val QUICK_MENU_FINGERS = 4
         const val QUICK_MENU_GESTURE_WINDOW_MS = 300L
+        const val PREFS_NAME = "gxcloud"
+        const val PREF_PREFER_IPV6 = "preferIpv6"
     }
 
     private val injectScript by lazy {
