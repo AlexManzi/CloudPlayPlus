@@ -5,6 +5,21 @@ was tried and rejected. Read this before suggesting changes.
 
 ---
 
+## Selected connection path update — 2026-10-05
+
+- The current IPv6 connection label tracks the newest `RTCPeerConnection`. This
+  supersedes the historical statements below that no peer-connection wrapper exists;
+  it does not restore decoder diagnostics.
+- Stats-page requests prefer the video receiver's
+  `transport.iceTransport.getSelectedCandidatePair()` for a synchronous connection
+  label. Without a video transport, receiver/sender/SCTP transports are checked.
+  A supported API returning null means no selected pair, not a reason to collect stats.
+- `getStats()` remains a compatibility fallback for unavailable/throwing APIs only.
+  Requests do not overlap, and stale results cannot overwrite a replacement peer or
+  a synchronous selected-pair result. No background polling or timers were added.
+- Validation: `node --test app/src/test/js/gxcloud_inject.test.cjs` (Node 18+).
+  This reduces report collection; battery savings have not been measured.
+
 ## WebView lifecycle update — 2026-09-29
 
 These entries supersede the older lifecycle/menu descriptions below. The measured video

@@ -244,8 +244,8 @@ class QuickMenuController(
                     is Int -> if (count > 0) "$count offered" else "None offered"
                     else -> "--"
                 }
-                // Address family and direct/relay of the selected ICE pair. One poll
-                // behind (getStats is async), so "--" for the first second of the page.
+                // Address family and direct/relay of the selected ICE pair. The
+                // compatibility getStats fallback can be one poll behind.
                 val connection = stats.opt("connectionPath") as? String ?: "--"
                 val text = "Resolution      $resolution\n" +
                     "Playback state  $state\n" +

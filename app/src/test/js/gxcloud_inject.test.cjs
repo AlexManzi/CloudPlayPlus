@@ -426,3 +426,150 @@ test('stats report the selected pair as IPv4/IPv6 and direct/relay, one poll beh
     await settle();
     assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv4 (relay)');
 });
+
+test('selected video ICE pair is current on the first poll and never collects full stats', () => {
+    let pair = { local: { type: 'host' }, remote: { type: 'host', address: '2603:1030::5' } };
+    let reads = 0;
+    const iceTransport = { getSelectedCandidatePair() { reads++; return pair; } };
+    class PeerConnection {
+        constructor() { this.connectionState = 'connected'; }
+        getReceivers() {
+            return [
+                { track: { kind: 'audio' }, transport: { iceTransport: { getSelectedCandidatePair() { assert.fail('audio path'); } } } },
+                { track: { kind: 'video' }, transport: { iceTransport } }
+            ];
+        }
+        getStats() { assert.fail('full stats collection'); }
+    }
+    const b = browser('off', { RTCPeerConnection: PeerConnection });
+    const pc = new b.window.RTCPeerConnection();
+    assert.equal(reads, 0); // No background polling.
+    assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv6 (direct)');
+    pair.local.type = 'relay';
+    pair.remote.address = '20.1.2.3';
+    assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv4 (relay)');
+    pair.local.type = 'host';
+    pair.remote.type = 'relay';
+    assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv4 (relay)');
+    pair = null;
+    assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, null);
+    pair = { local: { type: 'host' }, remote: { type: 'host', address: null } };
+    assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, null);
+    const beforeClose = reads;
+    pc.connectionState = 'closed';
+    assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, null);
+    assert.equal(reads, beforeClose);
+});
+
+test('selected pair can be read through senders or SCTP when no video transport exists', () => {
+    for (const source of ['sender', 'sctp']) {
+        const transport = { iceTransport: { getSelectedCandidatePair: () => ({
+            local: { type: 'host' }, remote: { type: 'host', address: '20.1.2.3' }
+        }) } };
+        class PeerConnection {
+            constructor() { if (source === 'sctp') this.sctp = { transport }; }
+            getReceivers() { return [{ track: { kind: 'video' }, transport: null }]; }
+            getSenders() { return source === 'sender' ? [{ transport }] : []; }
+            getStats() { assert.fail('full stats collection'); }
+        }
+        const b = browser('off', { RTCPeerConnection: PeerConnection });
+        new b.window.RTCPeerConnection();
+        assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv4 (direct)');
+    }
+});
+
+const pathReport = address => new Map([
+    ['T', { id: 'T', type: 'transport', selectedCandidatePairId: 'P' }],
+    ['P', { id: 'P', type: 'candidate-pair', remoteCandidateId: 'R' }],
+    ['R', { id: 'R', type: 'remote-candidate', candidateType: 'host', address }]
+]);
+
+test('unavailable or throwing selected-pair API falls back without overlapping requests', async () => {
+    for (const api of [undefined, () => { throw new Error('unavailable'); }]) {
+        let resolveStats;
+        let calls = 0;
+        class PeerConnection {
+            getReceivers() { return [{ track: { kind: 'video' }, transport: { iceTransport: { getSelectedCandidatePair: api } } }]; }
+            getStats() { calls++; return new Promise(resolve => { resolveStats = resolve; }); }
+        }
+        const b = browser('off', { RTCPeerConnection: PeerConnection });
+        new b.window.RTCPeerConnection();
+        assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, null);
+        b.window.__gxcloudGetStreamStats();
+        await settle();
+        assert.equal(calls, 1);
+        resolveStats(pathReport('2603:1030::5'));
+        await settle();
+        assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv6 (direct)');
+        await settle();
+        resolveStats(new Map());
+        await settle();
+    }
+});
+
+test('old pending stats neither block nor overwrite a replacement connection', async () => {
+    class PeerConnection {
+        getStats() { return new Promise(resolve => { this.resolveStats = resolve; }); }
+    }
+    const b = browser('off', { RTCPeerConnection: PeerConnection });
+    const old = new b.window.RTCPeerConnection();
+    b.window.__gxcloudGetStreamStats();
+    await settle();
+    const current = new b.window.RTCPeerConnection();
+    b.window.__gxcloudGetStreamStats();
+    await settle();
+    assert.equal(typeof current.resolveStats, 'function');
+    current.resolveStats(pathReport('20.1.2.3'));
+    await settle();
+    old.resolveStats(pathReport('2603:1030::5'));
+    await settle();
+    assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv4 (direct)');
+    await settle();
+    current.resolveStats(new Map());
+    await settle();
+});
+
+test('closed peers and synchronous or asynchronous stats failures are contained', async () => {
+    for (const failure of ['sync', 'async', 'closed']) {
+        let calls = 0;
+        class PeerConnection {
+            constructor() { this.connectionState = failure === 'closed' ? 'closed' : 'connected'; }
+            getStats() {
+                calls++;
+                if (failure === 'sync') throw new Error('stats unavailable');
+                return Promise.reject(new Error('stats unavailable'));
+            }
+        }
+        const b = browser('off', { RTCPeerConnection: PeerConnection });
+        new b.window.RTCPeerConnection();
+        for (let i = 0; i < 2; i++) {
+            assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, null);
+            await settle();
+        }
+        assert.equal(calls, failure === 'closed' ? 0 : 2);
+    }
+});
+
+test('late full stats cannot overwrite a newly available selected-pair result', async () => {
+    let transport = null;
+    let resolveStats;
+    class PeerConnection {
+        getReceivers() { return [{ track: { kind: 'video' }, transport }]; }
+        getStats() { return new Promise(resolve => { resolveStats = resolve; }); }
+    }
+    const b = browser('off', { RTCPeerConnection: PeerConnection });
+    new b.window.RTCPeerConnection();
+    b.window.__gxcloudGetStreamStats();
+    await settle();
+    transport = { iceTransport: { getSelectedCandidatePair: () => ({
+        local: { type: 'host' }, remote: { type: 'host', address: '20.1.2.3' }
+    }) } };
+    assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv4 (direct)');
+    resolveStats(pathReport('2603:1030::5'));
+    await settle();
+    transport = null;
+    assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv4 (direct)');
+    await settle();
+    resolveStats(new Map());
+    await settle();
+});

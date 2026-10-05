@@ -38,8 +38,7 @@
 
     // Returns true once the toggle is hidden (or was already hidden), so callers
     // can stop retrying. Idempotent — cheap to call repeatedly.
-    const hideMenuButton = () => {
-        const toggle = document.querySelector('button[aria-label="Quick actions toggle" i]');
+    const hideMenuButton = (toggle = document.querySelector('button[aria-label="Quick actions toggle" i]')) => {
         if (!toggle) return false;
         const container = toggle.closest('.absolute') ?? toggle.parentElement;
         if (!container) return false;
@@ -48,8 +47,19 @@
         container.style.visibility = 'hidden';
         container.addEventListener('mouseenter', () => container.style.visibility = 'visible');
         container.addEventListener('mouseleave', () => container.style.visibility = 'hidden');
-        container.addEventListener('touchstart', () => container.style.visibility = 'visible');
-        container.addEventListener('touchend', () => setTimeout(() => container.style.visibility = 'hidden', 1000));
+        let hideTimer = null;
+        container.addEventListener('touchstart', () => {
+            clearTimeout(hideTimer);
+            hideTimer = null;
+            container.style.visibility = 'visible';
+        });
+        container.addEventListener('touchend', () => {
+            clearTimeout(hideTimer);
+            hideTimer = setTimeout(() => {
+                hideTimer = null;
+                container.style.visibility = 'hidden';
+            }, 1000);
+        });
         return true;
     };
 
@@ -452,14 +462,19 @@
 
     const rankIceCandidates = (candidates, consoleAddr) => {
         const parsed = candidates.map(parseCandidate);
-        const known = new Set(parsed.filter(p => p.valid).map(p => p.parts[4].toLowerCase() + ' ' + p.parts[5]));
-        const template = parsed.find(p => p.valid)?.entry ?? { messageType: 'iceCandidate', sdpMLineIndex: '0', sdpMid: '0' };
-        const added = (consoleAddr?.ports ?? [])
-            .filter(port => !known.has(consoleAddr.address.toLowerCase() + ' ' + port))
-            .map((port, i) => parseCandidate({
-                ...template,
-                candidate: `a=candidate:${candidates.length + i + 1} 1 UDP 1 ${consoleAddr.address} ${port} typ host`
-            }));
+        let added = [];
+        // Cloud sessions have no console candidates to synthesize or deduplicate.
+        if (consoleAddr?.ports.length) {
+            const known = new Set(parsed.filter(p => p.valid).map(p => p.parts[4].toLowerCase() + ' ' + p.parts[5]));
+            const ports = consoleAddr.ports.filter(port => !known.has(consoleAddr.address.toLowerCase() + ' ' + port));
+            if (ports.length) {
+                const template = parsed.find(p => p.valid)?.entry ?? { messageType: 'iceCandidate', sdpMLineIndex: '0', sdpMid: '0' };
+                added = ports.map((port, i) => parseCandidate({
+                    ...template,
+                    candidate: `a=candidate:${candidates.length + i + 1} 1 UDP 1 ${consoleAddr.address} ${port} typ host`
+                }));
+            }
+        }
         serverIpv6Candidates = parsed.filter(p => p.ipv6).length + added.length;
         if (!preferIpv6 || !serverIpv6Candidates) return null;
         // New candidates go before a=end-of-candidates, which must stay last.
@@ -495,16 +510,17 @@
         window.fetch = function(input, init) {
             const result = nativeFetch.apply(this, arguments);
             const url = typeof input === 'string' ? input : input?.url ?? String(input);
+            const isConsoleConfig = CONSOLE_CONFIG_URL.test(url);
+            const ice = isConsoleConfig ? null : ICE_URL.exec(url);
+            if (!isConsoleConfig && !ice) return result;
             const method = String(init?.method ?? input?.method ?? 'GET').toUpperCase();
             if (method !== 'GET') return result;
-            if (CONSOLE_CONFIG_URL.test(url)) {
+            if (isConsoleConfig) {
                 // Observe only. Cloned before this returns, so it never races xCloud's read.
                 result.then(response => response.ok ? response.clone().json() : null)
                     .then(readConsoleAddress, () => { consoleIpv6 = null; });
                 return result;
             }
-            const ice = ICE_URL.exec(url);
-            if (!ice) return result;
             // Any parse failure (204 while the server is still gathering, a schema
             // change) hands xCloud the untouched response.
             return result.then(response =>
@@ -515,12 +531,12 @@
     window.__gxcloudSetPreferIpv6 = (enabled) => { preferIpv6 = enabled === true; };
 
     // Which path the live stream actually took. Only the newest peer connection is
-    // kept — xCloud makes one per stream. getStats() is async and the stats page
-    // polls synchronously, so each poll starts a refresh and reports the previous
-    // one (at most one poll interval stale). Nothing runs unless the page asks.
+    // kept — xCloud makes one per stream. Read the selected ICE pair synchronously
+    // when available; only the compatibility getStats() path is one poll behind.
+    // Nothing runs unless the stats page asks.
     let streamPeerConnection = null;
     let connectionPath = null;
-    let connectionPathPending = false;
+    let connectionPathPending = null;
     const NativePeerConnection = window.RTCPeerConnection;
     if (typeof NativePeerConnection === 'function') {
         window.RTCPeerConnection = class RTCPeerConnection extends NativePeerConnection {
@@ -528,9 +544,19 @@
                 super(...args);
                 streamPeerConnection = this;
                 connectionPath = null;
+                connectionPathPending = null;
             }
         };
     }
+
+    const describeCandidates = (local, remote) => {
+        const address = remote?.address ?? remote?.ip;
+        if (typeof address !== 'string' || !address) return null;
+        // RTCIceCandidate uses type; stats reports use candidateType.
+        const relayed = (remote.candidateType ?? remote.type) === 'relay' ||
+            (local?.candidateType ?? local?.type) === 'relay';
+        return (address.includes(':') ? 'IPv6' : 'IPv4') + (relayed ? ' (relay)' : ' (direct)');
+    };
 
     const describePath = (stats) => {
         let pairId = null;
@@ -542,20 +568,55 @@
         const pair = reports.get(pairId);
         const remote = reports.get(pair?.remoteCandidateId);
         const local = reports.get(pair?.localCandidateId);
-        const address = remote?.address ?? remote?.ip;
-        if (typeof address !== 'string') return null;
-        const relayed = remote.candidateType === 'relay' || local?.candidateType === 'relay';
-        return (address.includes(':') ? 'IPv6' : 'IPv4') + (relayed ? ' (relay)' : ' (direct)');
+        return describeCandidates(local, remote);
+    };
+
+    const readSelectedPath = (pc) => {
+        const receivers = pc.getReceivers?.() ?? [];
+        // Prefer the video path when media and data use separate transports.
+        const videoReceiver = receivers.find(receiver => receiver.track?.kind === 'video' && receiver.transport);
+        const transports = videoReceiver ? [videoReceiver.transport] : [
+            ...receivers.map(receiver => receiver.transport),
+            ...(pc.getSenders?.() ?? []).map(sender => sender.transport),
+            pc.sctp?.transport
+        ];
+        for (const transport of new Set(transports)) {
+            const ice = transport?.iceTransport;
+            if (typeof ice?.getSelectedCandidatePair !== 'function') continue;
+            const pair = ice.getSelectedCandidatePair();
+            // null is authoritative: no pair is selected. Do not collect stats
+            // just because ICE is negotiating or restarting.
+            return describeCandidates(pair?.local, pair?.remote);
+        }
+        return undefined; // API/transport unavailable: use compatibility stats.
     };
 
     const refreshConnectionPath = () => {
         const pc = streamPeerConnection;
-        if (!pc || connectionPathPending) return;
-        if (pc.connectionState === 'closed') { connectionPath = null; return; }
-        connectionPathPending = true;
-        pc.getStats().then(stats => {
-            if (pc === streamPeerConnection) connectionPath = describePath(stats);
-        }, () => {}).finally(() => { connectionPathPending = false; });
+        if (!pc) return;
+        if (pc.connectionState === 'closed') {
+            connectionPath = null;
+            connectionPathPending = null;
+            return;
+        }
+        try {
+            const path = readSelectedPath(pc);
+            if (path !== undefined) {
+                connectionPath = path;
+                connectionPathPending = null;
+                return;
+            }
+        } catch (_) { /* An unusable implementation falls back to stats. */ }
+        if (connectionPathPending?.pc === pc) return;
+        const request = { pc };
+        connectionPathPending = request;
+        // Defer invocation too, so synchronous getStats failures are contained.
+        Promise.resolve().then(() => pc.getStats()).then(stats => {
+            if (pc === streamPeerConnection && connectionPathPending === request && pc.connectionState !== 'closed')
+                connectionPath = describePath(stats);
+        }, () => {}).finally(() => {
+            if (connectionPathPending === request) connectionPathPending = null;
+        });
     };
 
     window.__gxcloudGetStreamStats = () => {
@@ -615,10 +676,10 @@
         const menuObserver = new MutationObserver(() => { hideMenuButton(); });
         const tryHide = () => {
             menuTimer = null;
-            if (hideMenuButton()) {
+            const toggle = document.querySelector('button[aria-label="Quick actions toggle" i]');
+            if (hideMenuButton(toggle)) {
                 // Landed. Keep a narrowly-scoped watch in case xCloud re-renders
                 // the toggle and drops our dataset marker.
-                const toggle = document.querySelector('button[aria-label="Quick actions toggle" i]');
                 const container = toggle?.closest('.absolute');
                 if (container?.parentNode) menuObserver.observe(container.parentNode, { childList: true });
                 return;
