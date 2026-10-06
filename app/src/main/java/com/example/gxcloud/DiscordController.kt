@@ -102,16 +102,16 @@ class DiscordController(
         state = State.CLOSED
     }
 
-    fun onResume() {
+    fun onResume(updateGlobalTimers: Boolean = true) {
         resumed = true
         // Timers are global. An alive Discord view can resume them after Xbox was lost.
-        webView?.resumeTimers()
+        if (updateGlobalTimers) webView?.resumeTimers()
         if (state != State.CLOSED) webView?.onResume()
     }
 
-    fun onPause() {
+    fun onPause(updateGlobalTimers: Boolean = true) {
         resumed = false
-        webView?.pauseTimers()
+        if (updateGlobalTimers) webView?.pauseTimers()
         if (state != State.CLOSED) webView?.onPause()
     }
 

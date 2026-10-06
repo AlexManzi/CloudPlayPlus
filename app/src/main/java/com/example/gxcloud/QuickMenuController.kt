@@ -229,7 +229,6 @@ class QuickMenuController(
                 val casMode = getCasMode()
                 val resolution = stats.optString("resolution", "--")
                 val total = stats.optString("totalFrames", "--")
-                val presented = stats.optString("presentedFrames", "--")
                 val state = stats.optString("state", "No active stream")
                 // System CPU% and GPU clock/busy% are not shown: confirmed on this device
                 // that neither has a readable data source without root (/proc/stat has been
@@ -250,7 +249,6 @@ class QuickMenuController(
                 val text = "Resolution      $resolution\n" +
                     "Playback state  $state\n" +
                     "Total frames    $total\n" +
-                    "Presented frames $presented\n" +
                     "CAS mode        ${casMode.replaceFirstChar { it.uppercase() }}\n" +
                     "RAM used        $ram\n" +
                     "Thermal status  $thermal\n" +

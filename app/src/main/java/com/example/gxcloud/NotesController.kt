@@ -16,15 +16,20 @@ import androidx.appcompat.app.AlertDialog
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.lang.ref.WeakReference
 import java.util.UUID
 import android.os.Handler
 import android.os.Looper
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 class NotesController(
     private val activity: Activity,
     private val stub: ViewStub
 ) {
-    val isVisible: Boolean get() = visible
+    // Back/focus handling must also respect an open request waiting for disk I/O.
+    val isVisible: Boolean get() = visible || showRequested
 
     private data class Note(val id: String, var title: String, var body: String, var updatedAt: Long)
 
@@ -37,28 +42,60 @@ class NotesController(
     private var selectedNoteId: String? = null
     private var loaded = false
     private var loadingEditor = false
-    private var dirty = false
+    private val saves = SaveRevisionTracker()
+    private var loading = false
+    private var showRequested = false
+    private var destroyed = false
+    private val rows = mutableMapOf<String, TextView>()
+    private var styledSelection: String? = null
+
+    private fun markDirty() {
+        saves.changed()
+    }
 
     fun show() {
+        if (destroyed) return
+        showRequested = true
         if (container == null) inflate()
         if (!loaded) {
-            notes.clear()
-            notes.addAll(load())
-            if (notes.isEmpty()) notes.add(Note(UUID.randomUUID().toString(), "", "", System.currentTimeMillis()))
-            loaded = true
+            if (loading) return
+            loading = true
+            // One process-wide queue orders old-Activity saves before replacement loads.
+            val file = notesFile
+            val owner = WeakReference(this)
+            val handler = autoSaveHandler
+            io.execute {
+                val result = load(file)
+                handler.post {
+                    val controller = owner.get() ?: return@post
+                    if (controller.destroyed) return@post
+                    controller.loading = false
+                    controller.notes.clear()
+                    controller.notes.addAll(result)
+                    if (controller.notes.isEmpty()) controller.notes.add(Note(UUID.randomUUID().toString(), "", "", System.currentTimeMillis()))
+                    controller.loaded = true
+                    if (controller.showRequested) controller.showLoaded()
+                }
+            }
+            return
         }
+        showLoaded()
+    }
+
+    private fun showLoaded() {
         val root = container!!
         val list = root.findViewById<LinearLayout>(R.id.notesListContainer)
         val title = root.findViewById<EditText>(R.id.notesTitleEdit)
         val body = root.findViewById<EditText>(R.id.notesBodyEdit)
-        rebuildList(list, title, body)
         if (selectedNoteId == null || notes.none { it.id == selectedNoteId }) selectedNoteId = notes[0].id
+        rebuildList(list, title, body)
         loadIntoEditor(selectedNoteId!!, title, body)
         root.visibility = View.VISIBLE
         visible = true
     }
 
     fun hide() {
+        showRequested = false
         forceSave()
         container?.visibility = View.GONE
         visible = false
@@ -72,12 +109,16 @@ class NotesController(
 
     fun destroy() {
         forceSave()
+        destroyed = true
+        showRequested = false
         autoSaveHandler.removeCallbacksAndMessages(null)
         saveRunnable = null
     }
 
     private fun inflate(): FrameLayout {
         val root = stub.inflate() as FrameLayout
+        // ViewStub inflation defaults to visible; don't expose an empty editor while loading.
+        root.visibility = View.GONE
         container = root
         val list = root.findViewById<LinearLayout>(R.id.notesListContainer)
         val title = root.findViewById<EditText>(R.id.notesTitleEdit)
@@ -87,7 +128,7 @@ class NotesController(
             forceSave()
             val note = Note(UUID.randomUUID().toString(), "", "", System.currentTimeMillis())
             notes.add(0, note)
-            dirty = true
+            markDirty()
             save()
             select(note.id, list, title, body)
         }
@@ -98,7 +139,7 @@ class NotesController(
                 .setPositiveButton("Delete") { _, _ ->
                     notes.removeAll { it.id == id }
                     if (notes.isEmpty()) notes.add(Note(UUID.randomUUID().toString(), "", "", System.currentTimeMillis()))
-                    dirty = true
+                    markDirty()
                     save()
                     select(notes[0].id, list, title, body)
                 }
@@ -112,7 +153,7 @@ class NotesController(
                     it.title = title.text.toString()
                     it.body = body.text.toString()
                     it.updatedAt = System.currentTimeMillis()
-                    dirty = true
+                    markDirty()
                 }
                 scheduleSave()
             }
@@ -145,19 +186,44 @@ class NotesController(
     }
 
     private fun rebuildList(list: LinearLayout, title: EditText, body: EditText) {
-        list.removeAllViews()
-        notes.forEach { note ->
-            val row = TextView(activity).apply {
-                text = note.title.ifEmpty { "Untitled" }
-                setTextColor(if (note.id == selectedNoteId) 0xFFFFFFFF.toInt() else 0xFF999999.toInt())
-                setBackgroundColor(if (note.id == selectedNoteId) 0xFF2A2A2A.toInt() else 0x00000000)
-                setPadding(40, 28, 40, 28)
-                textSize = 14f
-                maxLines = 1
-                ellipsize = TextUtils.TruncateAt.END
-                setOnClickListener { forceSave(); select(note.id, list, title, body) }
+        val liveIds = notes.mapTo(HashSet()) { it.id }
+        val iterator = rows.iterator()
+        while (iterator.hasNext()) {
+            val (id, row) = iterator.next()
+            if (id !in liveIds) {
+                list.removeView(row)
+                iterator.remove()
             }
-            list.addView(row)
+        }
+        notes.forEachIndexed { index, note ->
+            val row = rows.getOrPut(note.id) {
+                TextView(activity).apply {
+                    setTextColor(0xFF999999.toInt())
+                    setBackgroundColor(0x00000000)
+                    setPadding(40, 28, 40, 28)
+                    textSize = 14f
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                    setOnClickListener { forceSave(); select(note.id, list, title, body) }
+                }
+            }
+            val label = note.title.ifEmpty { "Untitled" }
+            if (row.text.toString() != label) row.text = label
+            if (list.getChildAt(index) !== row) {
+                list.removeView(row)
+                list.addView(row, index)
+            }
+        }
+        if (styledSelection != selectedNoteId) {
+            rows[styledSelection]?.apply {
+                setTextColor(0xFF999999.toInt())
+                setBackgroundColor(0x00000000)
+            }
+            rows[selectedNoteId]?.apply {
+                setTextColor(0xFFFFFFFF.toInt())
+                setBackgroundColor(0xFF2A2A2A.toInt())
+            }
+            styledSelection = selectedNoteId
         }
     }
 
@@ -168,30 +234,53 @@ class NotesController(
         autoSaveHandler.postDelayed(runnable, 600)
     }
 
-    private fun load(): List<Note> = try {
-        val arr = JSONArray(String(notesFile.readFully()))
-        (0 until arr.length()).map { i ->
-            val o = arr.getJSONObject(i)
-            Note(o.getString("id"), o.getString("title"), o.getString("body"), o.getLong("updatedAt"))
-        }
-    } catch (_: Exception) { emptyList() }
-
     private fun save() {
-        if (!loaded || !dirty) return
-        try {
+        if (!loaded) return
+        val version = saves.begin() ?: return
+        val snapshot = notes.map { it.copy() }
+        val file = notesFile
+        val owner = WeakReference(this)
+        val handler = autoSaveHandler
+        io.execute {
+            val success = write(file, snapshot)
+            handler.post {
+                val controller = owner.get() ?: return@post
+                if (controller.destroyed) return@post
+                // An older completion must never clear newer unsaved edits.
+                controller.saves.complete(version, success)
+            }
+        }
+    }
+
+    private companion object {
+        private fun load(file: AtomicFile): List<Note> = try {
+            val arr = JSONArray(String(file.readFully()))
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                Note(o.getString("id"), o.getString("title"), o.getString("body"), o.getLong("updatedAt"))
+            }
+        } catch (_: Exception) { emptyList() }
+
+        private fun write(file: AtomicFile, snapshot: List<Note>): Boolean = try {
             val arr = JSONArray()
-            notes.forEach { note -> arr.put(JSONObject().apply {
+            snapshot.forEach { note -> arr.put(JSONObject().apply {
                 put("id", note.id); put("title", note.title); put("body", note.body); put("updatedAt", note.updatedAt)
             }) }
-            val stream = notesFile.startWrite()
+            val stream = file.startWrite()
             try {
                 stream.write(arr.toString().toByteArray())
-                notesFile.finishWrite(stream)
-                dirty = false
+                file.finishWrite(stream)
             } catch (e: Exception) {
-                notesFile.failWrite(stream)
+                file.failWrite(stream)
                 throw e
             }
-        } catch (_: Exception) {}
+            true
+        } catch (_: Exception) { false }
+
+
+        // Idle threads expire; queued writes are never cancelled on Activity destruction.
+        val io = ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS, LinkedBlockingQueue()).apply {
+            allowCoreThreadTimeOut(true)
+        }
     }
 }

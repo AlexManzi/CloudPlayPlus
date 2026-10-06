@@ -8,19 +8,25 @@ const source = readFileSync(resolve(__dirname, '../../main/res/raw/gxcloud_injec
 
 // A small browser harness exercises the injected script's public entry points.
 // Mutation delivery is deferred, as in the browser, so reparenting is atomic.
-function browser(mode = 'off', { attached = true, webgl = true, fetch, preferIpv6, RTCPeerConnection } = {}) {
+function browser(mode = 'off', { attached = true, webgl = true, fetch, preferIpv6, RTCPeerConnection, videoWidth = 1920 } = {}) {
     const observers = new Set();
-    const pending = new Set();
+    const pending = new Map();
     const timers = new Map();
     const raf = new Map();
     const vfc = new Map();
     const draws = [];
+    const drawSizes = [];
     let id = 0;
     let lostContexts = 0;
-    function mutation(target) {
+    let documentQueries = 0;
+    function mutation(target, addedNodes = [], removedNodes = []) {
         for (const observer of observers) {
             for (const [node, options] of observer.targets) {
-                if (node === target || (options.subtree && node.contains(target))) pending.add(observer);
+                if (node === target || (options.subtree && node.contains(target))) {
+                    if (!pending.has(observer)) pending.set(observer, []);
+                    pending.get(observer).push({ target, addedNodes, removedNodes });
+                    break;
+                }
             }
         }
     }
@@ -36,11 +42,21 @@ function browser(mode = 'off', { attached = true, webgl = true, fetch, preferIpv
             this.height = 150;
         }
         get parentElement() { return this.parentNode; }
+        get nodeType() { return 1; }
+        matches() { return this.tagName === 'BUTTON' && this.ariaLabel?.toLowerCase() === 'quick actions toggle'; }
+        querySelector(selector) {
+            for (const child of this.children) {
+                if (child.matches(selector)) return child;
+                const found = child.querySelector(selector);
+                if (found) return found;
+            }
+            return null;
+        }
         appendChild(child) {
             child.remove();
             this.children.push(child);
             child.parentNode = this;
-            mutation(this);
+            mutation(this, [child]);
             return child;
         }
         remove() {
@@ -48,7 +64,7 @@ function browser(mode = 'off', { attached = true, webgl = true, fetch, preferIpv
             const parent = this.parentNode;
             parent.children.splice(parent.children.indexOf(this), 1);
             this.parentNode = null;
-            mutation(parent);
+            mutation(parent, [], [this]);
         }
         contains(node) { return this === node || this.children.some(child => child.contains(node)); }
         addEventListener(type, listener) {
@@ -56,13 +72,16 @@ function browser(mode = 'off', { attached = true, webgl = true, fetch, preferIpv
             this.listeners.get(type).add(listener);
         }
         removeEventListener(type, listener) { this.listeners.get(type)?.delete(listener); }
-        emit(type) {
-            const event = { target: this, preventDefault() {} };
+        emit(type, target = this) {
+            const event = { target, preventDefault() {} };
             for (const listener of [...(this.listeners.get(type) ?? [])]) listener(event);
         }
         closest() { return this.parentNode; }
         getContext(type) {
-            if (type === '2d') return { drawImage: () => draws.push('bridge') };
+            if (type === '2d') return { drawImage: (_, x, y, width, height) => {
+                draws.push('bridge');
+                drawSizes.push([width, height]);
+            } };
             if (!webgl) return null;
             return new Proxy({}, {
                 get: (_, key) => {
@@ -107,7 +126,11 @@ function browser(mode = 'off', { attached = true, webgl = true, fetch, preferIpv
     document.createElement = tag => new Element(tag.toUpperCase());
     const menu = document.body.appendChild(new Element('DIV'));
     const toggle = menu.appendChild(new Element('BUTTON'));
-    document.querySelector = () => toggle;
+    toggle.ariaLabel = 'Quick actions toggle';
+    document.querySelector = selector => {
+        documentQueries++;
+        return Element.prototype.querySelector.call(document, selector);
+    };
     document.querySelectorAll = tag => {
         const found = [];
         function visit(node) {
@@ -120,6 +143,7 @@ function browser(mode = 'off', { attached = true, webgl = true, fetch, preferIpv
     const streamContainer = new Element('DIV');
     streamContainer.dataset.testid = 'media-container';
     const video = streamContainer.appendChild(new Video());
+    video.videoWidth = videoWidth;
     if (attached) document.body.appendChild(streamContainer);
     const window = { __gxcloudInitialCasMode: mode, __gxcloudInitialPreferIpv6: preferIpv6, fetch, RTCPeerConnection };
     runInNewContext(source, {
@@ -132,14 +156,16 @@ function browser(mode = 'off', { attached = true, webgl = true, fetch, preferIpv
     });
     function flush() {
         while (pending.size) {
-            const observer = pending.values().next().value;
+            const [observer, records] = pending.entries().next().value;
             pending.delete(observer);
-            if (observer.targets.size) observer.callback([]);
+            if (observer.targets.size) observer.callback(records);
         }
     }
     return {
-        window, document, video, streamContainer, Element, observers, timers, raf, vfc, draws, flush,
+        window, document, video, streamContainer, Element, observers, timers, raf, vfc, draws, drawSizes, flush,
         get lostContexts() { return lostContexts; },
+        get documentQueries() { return documentQueries; },
+        menu, toggle,
         canvases: () => document.querySelectorAll('canvas'),
         fireTimer(delay) {
             const entry = [...timers].find(([, timer]) => timer.delay === delay);
@@ -167,6 +193,87 @@ test('initial Off has no canvas, render loop, or liveness timer', () => {
     for (const observer of b.observers) {
         for (const options of observer.targets.values()) assert.equal(options.subtree, undefined);
     }
+});
+
+test('Quick Actions ignores unrelated mutations and re-hides nested replacements once per batch', () => {
+    const b = browser();
+    b.flush();
+    const queries = b.documentQueries;
+    const unrelated = b.document.body.appendChild(new b.Element('DIV'));
+    unrelated.appendChild(new b.Element('BUTTON'));
+    b.flush();
+    unrelated.remove();
+    b.flush();
+    assert.equal(b.documentQueries, queries);
+
+    b.menu.remove();
+    const replacement = new b.Element('DIV');
+    const wrapper = replacement.appendChild(new b.Element('DIV'));
+    const toggle = wrapper.appendChild(new b.Element('BUTTON'));
+    toggle.ariaLabel = 'QUICK ACTIONS TOGGLE';
+    b.document.body.appendChild(replacement);
+    b.flush();
+    assert.equal(b.documentQueries, queries + 1);
+    assert.equal(wrapper.style.visibility, 'hidden');
+    assert.equal(wrapper.listeners.get('touchend').size, 1);
+});
+
+test('pending metadata listeners are deduplicated and detached acquisition can retry', () => {
+    const b = browser('off', { attached: false, videoWidth: 0 });
+    b.video.play();
+    b.video.play();
+    assert.equal(b.video.listeners.get('loadedmetadata').size, 1);
+    b.video.emit('loadedmetadata'); // No dimensions yet: allow a later play to retry.
+    assert.equal(b.video.listeners.get('loadedmetadata').size, 0);
+    b.video.play();
+    b.video.play();
+    assert.equal(b.video.listeners.get('loadedmetadata').size, 1);
+    b.video.videoWidth = 1920;
+    b.video.emit('loadedmetadata');
+    assert.equal(b.video.listeners.get('loadedmetadata').size, 0);
+    assert.equal(b.video.dataset.gxBound, 'true');
+    b.document.body.appendChild(b.streamContainer);
+    b.flush();
+    assert.equal(b.video.dataset.gxBound, 'true');
+    assert.equal(b.timers.size, 0);
+});
+
+test('another acquisition path clears pending metadata before video reuse', () => {
+    const b = browser('off', { videoWidth: 0 });
+    b.video.play();
+    assert.equal(b.video.listeners.get('loadedmetadata').size, 1);
+    b.video.videoWidth = 1920;
+    b.document.emit('playing', b.video);
+    assert.equal(b.video.listeners.get('loadedmetadata').size, 0);
+    b.video.emit('ended');
+    b.video.videoWidth = 0;
+    b.video.play();
+    assert.equal(b.video.listeners.get('loadedmetadata').size, 1);
+    b.video.videoWidth = 1920;
+    b.video.emit('loadedmetadata');
+    assert.equal(b.video.dataset.gxBound, 'true');
+});
+
+test('CAS draw dimensions follow synchronous resize and replacement pipelines', () => {
+    const b = browser('normal');
+    b.frame();
+    assert.deepEqual(b.drawSizes.at(-1), [1920, 1080]);
+    b.video.videoWidth = 1280;
+    b.video.videoHeight = 720;
+    b.video.emit('resize');
+    b.frame();
+    assert.deepEqual(b.drawSizes.at(-1), [1280, 720]);
+    b.video.emit('resize');
+    b.window.__gxcloudSetCasMode('high');
+    b.frame();
+    assert.deepEqual(b.drawSizes.at(-1), [1280, 720]);
+    const canvas = b.canvases()[0];
+    canvas.emit('webglcontextlost');
+    b.video.videoWidth = 1920;
+    b.video.videoHeight = 1080;
+    canvas.emit('webglcontextrestored');
+    b.frame();
+    assert.deepEqual(b.drawSizes.at(-1), [1920, 1080]);
 });
 
 for (const event of ['ended', 'error', 'emptied']) {
@@ -246,6 +353,35 @@ test('mode switches preserve binding, one canvas, and the measured draw cadence'
     assert.equal(b.lostContexts, 3);
     b.video.emit('ended');
     assert.equal(b.window.__gxcloudGetStreamStats().state, 'No active stream');
+});
+
+test('successful CAS avoids temporary removal observers at startup and mode switches', () => {
+    const b = browser('normal');
+    assert.equal(b.observers.size, 1); // Quick Actions only; no temporary removal watch.
+    b.window.__gxcloudSetCasMode('high');
+    b.window.__gxcloudSetCasMode('normal');
+    assert.equal(b.observers.size, 1);
+    assert.equal(b.video._gxOffCleanup, undefined);
+    b.window.__gxcloudSetCasMode('off');
+    assert.equal(b.observers.size, 2);
+    assert.equal(typeof b.video._gxOffCleanup, 'function');
+    b.window.__gxcloudSetCasMode('high');
+    b.window.__gxcloudSetCasMode('normal');
+    assert.equal(b.observers.size, 2);
+    assert.equal(b.video._gxOffCleanup, undefined);
+    b.frame();
+    assert.deepEqual(b.draws.slice(-3), ['bridge', 'upload', 'draw']);
+});
+
+test('failed CAS on detached acquisition retains the bounded attachment watch', () => {
+    const b = browser('normal', { attached: false, webgl: false });
+    b.video.play();
+    assert.equal(typeof b.video._gxOffCleanup, 'function');
+    assert.equal(b.canvases().length, 0);
+    b.fireTimer(3000);
+    b.flush();
+    assert.equal(b.window.__gxcloudGetStreamStats().state, 'No active stream');
+    assert.equal(b.video._gxOffCleanup, undefined);
 });
 
 test('context loss retains binding cleanup and falls back to scoped removal detection', () => {

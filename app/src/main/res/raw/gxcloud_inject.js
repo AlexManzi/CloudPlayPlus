@@ -16,14 +16,13 @@
 
     const style = document.createElement('style');
     style.textContent =
-        'html, body { -webkit-tap-highlight-color: transparent !important; }' +
         // An xCloud container on the home route is wider than this screen. Mobile
         // Chromium widens the layout viewport to fit it, which drags every
         // fixed-position start-0/end-0 bar (the title bar) wider too and leaves its
         // end-side buttons off-screen behind a horizontal pan. Clipping x-overflow
         // on the root keeps the layout viewport at screen width. Needed on html,
         // not just body — Android Chromium ignores it on body alone.
-        'html, body { overflow-x: hidden !important; }' +
+        'html, body { -webkit-tap-highlight-color: transparent !important; overflow-x: hidden !important; }' +
         // Shell title-bar pill rings: the site draws them with a two-layer mask +
         // mask-composite:subtract trick, which this WebView renders wrong (invisible
         // or stretched past the button) because it assumes the desktop Chrome/Edge
@@ -38,7 +37,8 @@
 
     // Returns true once the toggle is hidden (or was already hidden), so callers
     // can stop retrying. Idempotent — cheap to call repeatedly.
-    const hideMenuButton = (toggle = document.querySelector('button[aria-label="Quick actions toggle" i]')) => {
+    const MENU_TOGGLE_SELECTOR = 'button[aria-label="Quick actions toggle" i]';
+    const hideMenuButton = (toggle = document.querySelector(MENU_TOGGLE_SELECTOR)) => {
         if (!toggle) return false;
         const container = toggle.closest('.absolute') ?? toggle.parentElement;
         if (!container) return false;
@@ -68,6 +68,13 @@
     // after a new one binds would leave the new one drawing through a 1x1 bridge —
     // on top of two stacked opaque canvases and two live GL contexts.
     let activeStreamVideo = null;
+    const pendingMetadata = new WeakMap();
+    const clearPendingMetadata = (video) => {
+        const listener = pendingMetadata.get(video);
+        if (!listener) return;
+        video.removeEventListener('loadedmetadata', listener);
+        pendingMetadata.delete(video);
+    };
     // Controlled by the native quick menu. Normal keeps the tuned production
     // shader; High is deliberately compiled with its own constant.
     const initialCasMode = window.__gxcloudInitialCasMode;
@@ -101,9 +108,16 @@
             if (video._gxOffCleanup === cleanup) delete video._gxOffCleanup;
         };
         const observeAncestors = () => {
+            // Compare in place first: sibling mutations usually leave the chain unchanged.
+            let parent = video.parentNode;
+            let i = 0;
+            while (parent && parent === ancestors[i]) {
+                parent = parent.parentNode;
+                i++;
+            }
+            if (!parent && i === ancestors.length) return;
             const next = [];
             for (let parent = video.parentNode; parent; parent = parent.parentNode) next.push(parent);
-            if (next.length === ancestors.length && next.every((node, i) => node === ancestors[i])) return;
             observer.disconnect();
             ancestors = next;
             for (const parent of ancestors) observer.observe(parent, { childList: true });
@@ -238,13 +252,17 @@
         // was a visible hitch every switch. Nothing to debounce: the event only fires
         // when the dimensions actually changed, and the equality check below already
         // absorbs any burst.
+        let drawWidth = bridge.width;
+        let drawHeight = bridge.height;
         const _syncSize = () => {
-            if (!video.videoWidth || !video.videoHeight) return;
             const w = video.videoWidth;
             const h = video.videoHeight;
+            if (!w || !h) return;
             if (canvas.width === w && canvas.height === h) return;
             canvas.width = bridge.width = w;
             canvas.height = bridge.height = h;
+            drawWidth = w;
+            drawHeight = h;
             // Resizing the bridge resets its 2D context to defaults — reapply
             bridgeCtx.imageSmoothingEnabled = false;
             bridgeCtx.globalCompositeOperation = 'copy';
@@ -261,7 +279,7 @@
 
         const present = () => {
             if (video.readyState < 2 || video.paused || document.hidden) return;
-            bridgeCtx.drawImage(video, 0, 0, bridge.width, bridge.height);
+            bridgeCtx.drawImage(video, 0, 0, drawWidth, drawHeight);
             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bridge);
             gl.drawArrays(gl.TRIANGLES, 0, 3);
         };
@@ -410,8 +428,9 @@
         // Cleanup restores direct video and releases the old context before a
         // replacement pipeline is created, so mode changes cannot stack canvases.
         if (video._casCleanup) video._casCleanup();
-        watchWithoutCAS(video);
         if (casMode !== 'off' && document.contains(video)) setupWebGLCAS(video);
+        // Successful CAS owns liveness checks; only create the fallback if needed.
+        watchWithoutCAS(video);
     };
 
     // Prefer IPv6. xCloud and Remote Play hand the client the server's ICE
@@ -560,14 +579,12 @@
 
     const describePath = (stats) => {
         let pairId = null;
-        const reports = new Map();
         stats.forEach(stat => {
-            reports.set(stat.id, stat);
             if (stat.type === 'transport' && stat.selectedCandidatePairId) pairId = stat.selectedCandidatePairId;
         });
-        const pair = reports.get(pairId);
-        const remote = reports.get(pair?.remoteCandidateId);
-        const local = reports.get(pair?.localCandidateId);
+        const pair = stats.get(pairId);
+        const remote = stats.get(pair?.remoteCandidateId);
+        const local = stats.get(pair?.localCandidateId);
         return describeCandidates(local, remote);
     };
 
@@ -575,7 +592,13 @@
         const receivers = pc.getReceivers?.() ?? [];
         // Prefer the video path when media and data use separate transports.
         const videoReceiver = receivers.find(receiver => receiver.track?.kind === 'video' && receiver.transport);
-        const transports = videoReceiver ? [videoReceiver.transport] : [
+        if (videoReceiver) {
+            const ice = videoReceiver.transport.iceTransport;
+            if (typeof ice?.getSelectedCandidatePair !== 'function') return undefined;
+            const pair = ice.getSelectedCandidatePair();
+            return describeCandidates(pair?.local, pair?.remote);
+        }
+        const transports = [
             ...receivers.map(receiver => receiver.transport),
             ...(pc.getSenders?.() ?? []).map(sender => sender.transport),
             pc.sctp?.transport
@@ -626,14 +649,10 @@
         const quality = video.getVideoPlaybackQuality?.();
         const total = quality?.totalVideoFrames ?? video.webkitDecodedFrameCount ?? '--';
         const dropped = quality?.droppedVideoFrames ?? video.webkitDroppedFrameCount ?? '--';
-        const presented = typeof total === 'number' && typeof dropped === 'number'
-            ? Math.max(total - dropped, 0)
-            : '--';
         return {
             state: video.ended ? 'Ended' : video.paused ? 'Paused' : video.readyState >= 2 ? 'Playing' : 'Loading',
             resolution: video.videoWidth && video.videoHeight ? video.videoWidth + '×' + video.videoHeight : '--',
             totalFrames: String(total),
-            presentedFrames: String(presented),
             droppedFrames: String(dropped),
             casMode,
             serverIpv6Candidates,
@@ -642,6 +661,7 @@
     };
 
     const foundVideo = (video) => {
+        clearPendingMetadata(video);
         if (video.dataset.gxBound) return;
         // Retire the previous stream before the new one allocates anything — see
         // activeStreamVideo above for why overlap is not survivable.
@@ -664,7 +684,6 @@
         video.addEventListener('ended', onStreamEnd);
         video.addEventListener('error', onStreamEnd);
         video.addEventListener('emptied', onStreamEnd);
-        watchWithoutCAS(video);
 
         // xCloud renders the quick-actions toggle in the same commit as the video,
         // so it is normally already in the DOM — check synchronously first. A
@@ -673,10 +692,26 @@
         const retryDelays = [150, 400, 1000, 2500, 5000];
         let attempt = 0;
         let menuTimer = null;
-        const menuObserver = new MutationObserver(() => { hideMenuButton(); });
+        const containsToggle = nodes => {
+            for (const node of nodes) {
+                if (node.nodeType === 1 &&
+                    (node.matches(MENU_TOGGLE_SELECTOR) || node.querySelector(MENU_TOGGLE_SELECTOR))) return true;
+            }
+            return false;
+        };
+        const menuObserver = new MutationObserver(records => {
+            // Only changes containing a toggle can change the document lookup result.
+            // Check changed subtrees locally before paying for a document-wide query.
+            for (const record of records) {
+                if (containsToggle(record.addedNodes) || containsToggle(record.removedNodes)) {
+                    hideMenuButton();
+                    return;
+                }
+            }
+        });
         const tryHide = () => {
             menuTimer = null;
-            const toggle = document.querySelector('button[aria-label="Quick actions toggle" i]');
+            const toggle = document.querySelector(MENU_TOGGLE_SELECTOR);
             if (hideMenuButton(toggle)) {
                 // Landed. Keep a narrowly-scoped watch in case xCloud re-renders
                 // the toggle and drops our dataset marker.
@@ -698,6 +733,7 @@
         };
 
         setupWebGLCAS(video);
+        watchWithoutCAS(video);
     };
 
     // xCloud plays three different <video> elements over a session: the Xbox
@@ -717,9 +753,14 @@
     const bindWhenSized = (v) => {
         if (v.dataset.gxBound) return;
         if (v.videoWidth) foundVideo(v);
-        else v.addEventListener('loadedmetadata', () => {
-            if (v.videoWidth) foundVideo(v);
-        }, { once: true });
+        else if (!pendingMetadata.has(v)) {
+            const onMetadata = () => {
+                clearPendingMetadata(v);
+                if (v.videoWidth) foundVideo(v);
+            };
+            pendingMetadata.set(v, onMetadata);
+            v.addEventListener('loadedmetadata', onMetadata, { once: true });
+        }
     };
 
     // Primary acquisition. Patching play() catches the element the instant xCloud

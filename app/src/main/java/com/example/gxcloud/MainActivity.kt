@@ -25,6 +25,7 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.TextView
 import org.json.JSONObject
+import java.lang.ref.WeakReference
 import androidx.activity.addCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
@@ -36,6 +37,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webViewContainer: FrameLayout
     private var recoveryView: View? = null
     private var documentGeneration = 0L
+    private val statsRequests = RequestGate()
+    private val injections = DocumentInjectionGate()
+    private var injectScript: String? = null
+    private var pendingInjection: (() -> Unit)? = null
+    private var destroyed = false
     private var casMode = "normal"
     // Persisted, unlike casMode: it's a property of the user's networks, not a
     // per-session look, so it should survive an app restart.
@@ -84,6 +90,8 @@ class MainActivity : AppCompatActivity() {
                 )
 
         setContentView(R.layout.activity_main)
+        window.setBackgroundDrawable(null)
+        prepareInjectionScript()
 
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
         audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
@@ -110,10 +118,19 @@ class MainActivity : AppCompatActivity() {
                     val stats = JSONObject().put("state", "Stream unavailable").put("casMode", casMode)
                     callback(JSONObject.quote(stats.toString()))
                 } else {
-                    view.evaluateJavascript(
-                        "JSON.stringify(window.__gxcloudGetStreamStats ? window.__gxcloudGetStreamStats() : null)"
-                    ) { raw ->
-                        if (view === webView && generation == documentGeneration) callback(raw)
+                    val request = statsRequests.begin()
+                    if (request != null) {
+                        try {
+                            view.evaluateJavascript(
+                                "JSON.stringify(window.__gxcloudGetStreamStats ? window.__gxcloudGetStreamStats() : null)"
+                            ) { raw ->
+                                if (statsRequests.complete(request)) {
+                                    if (view === webView && generation == documentGeneration) callback(raw)
+                                }
+                            }
+                        } catch (_: IllegalStateException) {
+                            statsRequests.complete(request)
+                        }
                     }
                 }
             },
@@ -160,7 +177,6 @@ class MainActivity : AppCompatActivity() {
         view.isFocusableInTouchMode = true
         view.requestFocus()
         view.setBackgroundColor(android.graphics.Color.BLACK)
-        window.setBackgroundDrawable(null)
         view.setLayerType(View.LAYER_TYPE_NONE, null)
         view.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
         view.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
@@ -206,17 +222,36 @@ class MainActivity : AppCompatActivity() {
         view.webChromeClient = WebChromeClient()
         view.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
-                if (view === webView) documentGeneration++
+                if (view === webView) {
+                    documentGeneration++
+                    statsRequests.invalidate()
+                    injections.invalidate()
+                    pendingInjection = null
+                }
             }
 
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
                 if (view === webView && url == view.url) {
-                    // Supply the selections before the script's warm stream acquisition.
-                    view.evaluateJavascript(
-                        "window.__gxcloudInitialCasMode='$casMode';window.__gxcloudInitialPreferIpv6=$preferIpv6;\n" + injectScript,
-                        null
-                    )
+                    val generation = documentGeneration
+                    val inject = {
+                        if (!destroyed && view === webView && generation == documentGeneration && url == view.url &&
+                            injections.begin(generation)) {
+                            // Supply current selections before warm stream acquisition.
+                            try {
+                                view.evaluateJavascript(
+                                    "window.__gxcloudInitialCasMode='$casMode';window.__gxcloudInitialPreferIpv6=$preferIpv6;\n" +
+                                        injectScript + "\nwindow.__gxcloudInjected === true;"
+                                ) { result ->
+                                    if (view === webView && generation == documentGeneration)
+                                        injections.complete(generation, result == "true")
+                                }
+                            } catch (_: IllegalStateException) {
+                                injections.complete(generation, false)
+                            }
+                        }
+                    }
+                    if (injectScript != null) inject() else pendingInjection = inject
                 }
             }
 
@@ -224,6 +259,9 @@ class MainActivity : AppCompatActivity() {
                 if (view === webView) {
                     webView = null
                     documentGeneration++
+                    statsRequests.invalidate()
+                    injections.invalidate()
+                    pendingInjection = null
                     showRecovery()
                 }
                 // Each affected WebView handles its own callback, even for a shared renderer.
@@ -276,7 +314,7 @@ class MainActivity : AppCompatActivity() {
         webView?.resumeTimers()
         webView?.onResume()
         webView?.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
-        discordController.onResume()
+        discordController.onResume(updateGlobalTimers = webView == null)
         quickMenuController.onResume()
         audioManager.requestAudioFocus(audioFocusRequest)
     }
@@ -288,12 +326,16 @@ class MainActivity : AppCompatActivity() {
         webView?.onPause()
         webView?.pauseTimers()
         webView?.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_WAIVED, true)
-        discordController.onPause()
+        discordController.onPause(updateGlobalTimers = webView == null)
         quickMenuController.onPause()
         audioManager.abandonAudioFocusRequest(audioFocusRequest)
     }
 
     override fun onDestroy() {
+        destroyed = true
+        pendingInjection = null
+        statsRequests.invalidate()
+        injections.invalidate()
         quickMenuController.destroy()
         notesController.destroy()
         discordController.destroy()
@@ -476,9 +518,22 @@ class MainActivity : AppCompatActivity() {
         const val PREF_PREFER_IPV6 = "preferIpv6"
     }
 
-    private val injectScript by lazy {
-        resources.openRawResource(R.raw.gxcloud_inject)
-            .bufferedReader()
-            .use { it.readText() }
+    private fun prepareInjectionScript() {
+        val appResources = applicationContext.resources
+        val mainHandler = android.os.Handler(mainLooper)
+        val owner = WeakReference(this)
+        Thread({
+            val script = appResources.openRawResource(R.raw.gxcloud_inject)
+                .bufferedReader().use { it.readText() }
+            mainHandler.post {
+                val activity = owner.get() ?: return@post
+                if (!activity.destroyed) {
+                    activity.injectScript = script
+                    val inject = activity.pendingInjection
+                    activity.pendingInjection = null
+                    inject?.invoke()
+                }
+            }
+        }, "gxcloud-script-loader").start()
     }
 }

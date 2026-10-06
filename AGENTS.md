@@ -5,6 +5,53 @@ was tried and rejected. Read this before suggesting changes.
 
 ---
 
+## Injection pipeline update — 2026-10-06
+
+- Initial binding and CAS mode switches attempt CAS setup before installing an
+  Off/failure removal observer. Successful setup avoids temporary observer allocation
+  and ancestor registrations; Off, failed setup, detached fallback acquisition, and
+  context loss retain their existing removal watches and bounded attachment handling.
+- The Quick Actions observer still watches only its container parent's `childList`.
+  It checks added/removed element subtrees for the toggle before querying the document,
+  and performs at most one document lookup per relevant batch. The retry ladder is unchanged.
+- Unsized stream videos have at most one pending element-bound metadata listener,
+  tracked in a WeakMap. Metadata delivery clears it even without dimensions so later
+  play calls can retry; any successful acquisition clears it before binding.
+- Full script submissions are deduplicated per document generation, including while
+  evaluation is pending. A successful JS acknowledgement suppresses later submissions;
+  failed evaluation can retry. Navigation, renderer loss, and destruction invalidate
+  the guard, and stale acknowledgements cannot finish a replacement injection. The
+  script's own document guard and native CAS/IPv6 initialization remain in place.
+- Validation includes unrelated mutations, nested toggle replacement, detached metadata
+  acquisition/retry, alternate acquisition cleanup, and injection generation/failure guards.
+  No steady-stream render loop, watchdog, Off-removal observer, or pipeline changes.
+
+## Kotlin startup and lifecycle update — 2026-10-06
+
+- Notes loads, JSON processing, and AtomicFile writes use one process-wide serial
+  worker queue. Immutable snapshots keep worker writes independent of editor changes;
+  save revisions prevent stale completions clearing newer edits and retain failed
+  revisions for retry. `forceSave` cancels debounce and queues immediately; it no
+  longer waits for disk completion. Activity destruction does not cancel queued writes,
+  and replacement-Activity loads follow earlier writes. The idle worker expires.
+- Pending Notes opens can be cancelled with Back; the editor remains hidden until
+  load completion. Destroyed controllers ignore callbacks. Rows are reused by note ID;
+  unchanged text and selection do not recreate views or backgrounds. The existing
+  editor-loading guard, colors, ordering, and 600ms save debounce remain.
+- The injection resource is read on a short-lived worker while Xbox loads. Injection
+  still waits for page finish, supplies current native selections, and checks the view,
+  URL, and document generation before a deferred injection. Worker callbacks use weak
+  owner references so pending I/O does not retain a destroyed Activity.
+- Activity lifecycle calls global WebView timer pause/resume once through Xbox, or
+  through Discord when Xbox is unavailable. Explicit open/recovery resumes and per-view
+  lifecycle/renderer policies remain. Window background removal runs once per Activity.
+- Native stats requests have one in-flight token. Navigation, renderer loss, and
+  destruction invalidate it; old callbacks cannot release newer requests. Poll intervals
+  and visibility gates remain unchanged. No render-pipeline changes are included.
+- JVM tests cover save revision ordering/failure retry and stats request invalidation.
+  On-device opening, save/lifecycle behavior, and startup/battery measurements remain
+  unverified. Asynchronous saves are not guaranteed to finish if the process is killed.
+
 ## Selected connection path update — 2026-10-05
 
 - The current IPv6 connection label tracks the newest `RTCPeerConnection`. This
