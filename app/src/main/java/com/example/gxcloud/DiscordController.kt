@@ -29,11 +29,25 @@ class DiscordController(
 
     @Volatile
     var enabled = false
+        set(value) {
+            field = value
+            if (!value) {
+                state = State.CLOSED
+                container?.visibility = View.GONE
+                tapCount = 0
+                tapResetHandler.removeCallbacks(tapResetRunnable)
+                releaseWebView()
+                recoveryView?.let { container?.removeView(it) }
+                recoveryView = null
+            }
+        }
     val isVisible: Boolean get() = state == State.UI_VISIBLE
 
     private var state = State.CLOSED
     private var container: FrameLayout? = null
     private var webView: WebView? = null
+    private var discordLoaded = false
+    private var permissionPending = false
     private var recoveryView: View? = null
     private var panelLayoutParams: FrameLayout.LayoutParams? = null
     private var panelElevation = 0f
@@ -65,6 +79,7 @@ class DiscordController(
     }
 
     fun open() {
+        if (!enabled) return
         if (container == null) inflate()
         if (webView == null) replaceWebView()
         webView!!.resumeTimers()
@@ -73,11 +88,13 @@ class DiscordController(
         container!!.visibility = android.view.View.VISIBLE
         state = State.UI_VISIBLE
 
+        if (discordLoaded) return
         if (hasRecordAudioPermission()) {
             loadDiscord()
-        } else {
+        } else if (!permissionPending) {
             // Do not load Discord until Android resolves its runtime prompt. Otherwise WebView
             // can reject Discord's first audio-capture request before the app has permission.
+            permissionPending = true
             ActivityCompat.requestPermissions(
                 activity,
                 arrayOf(Manifest.permission.RECORD_AUDIO),
@@ -87,7 +104,8 @@ class DiscordController(
     }
 
     fun onRequestPermissionsResult(requestCode: Int) {
-        if (requestCode == RECORD_AUDIO_PERMISSION_REQUEST && state == State.UI_VISIBLE) {
+        if (requestCode == RECORD_AUDIO_PERMISSION_REQUEST) {
+            permissionPending = false
             // Load after either decision: Discord remains usable without a microphone, while
             // WebView's permission callback below denies capture when Android denied it.
             loadDiscord()
@@ -95,9 +113,7 @@ class DiscordController(
     }
 
     fun close() {
-        webView?.stopLoading()
-        webView?.loadUrl("about:blank")
-        webView?.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_WAIVED, true)
+        // Hiding keeps the enabled Discord page and voice session alive.
         container?.visibility = android.view.View.GONE
         state = State.CLOSED
     }
@@ -106,26 +122,33 @@ class DiscordController(
         resumed = true
         // Timers are global. An alive Discord view can resume them after Xbox was lost.
         if (updateGlobalTimers) webView?.resumeTimers()
-        if (state != State.CLOSED) webView?.onResume()
+        webView?.onResume()
     }
 
     fun onPause(updateGlobalTimers: Boolean = true) {
         resumed = false
         if (updateGlobalTimers) webView?.pauseTimers()
-        if (state != State.CLOSED) webView?.onPause()
+        webView?.onPause()
     }
 
     fun destroy() {
         tapResetHandler.removeCallbacks(tapResetRunnable)
-        webView?.let {
+        releaseWebView()
+        container = null
+        recoveryView = null
+        state = State.CLOSED
+    }
+
+    private fun releaseWebView() {
+        val view = webView
+        webView = null
+        discordLoaded = false
+        view?.let {
             it.webViewClient = WebViewClient()
             it.webChromeClient = null
             (it.parent as? android.view.ViewGroup)?.removeView(it)
             it.destroy()
         }
-        webView = null
-        container = null
-        recoveryView = null
     }
 
     private fun isTapOnDiscord(event: MotionEvent): Boolean {
@@ -193,20 +216,12 @@ class DiscordController(
             override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
                 if (view === webView) {
                     webView = null
+                    discordLoaded = false
                     if (state == State.UI_VISIBLE) showRecovery()
                 }
                 (view.parent as? ViewGroup)?.removeView(view)
                 view.destroy()
                 return true
-            }
-
-            override fun onPageFinished(view: WebView, url: String) {
-                // A fast reopen can finish the old blank navigation after open() resumes
-                // this WebView. Do not pause the newly visible Discord session.
-                if (view === webView && url == "about:blank" && state == State.CLOSED) {
-                    view.clearHistory()
-                    view.onPause()
-                }
             }
         }
     }
@@ -244,7 +259,10 @@ class DiscordController(
             PackageManager.PERMISSION_GRANTED
 
     private fun loadDiscord() {
-        if (state == State.UI_VISIBLE) webView?.loadUrl("https://discord.com/app")
+        val view = webView ?: return
+        if (!enabled || discordLoaded) return
+        discordLoaded = true
+        view.loadUrl("https://discord.com/app")
     }
 
     private companion object {

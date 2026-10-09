@@ -3,6 +3,7 @@ package com.example.gxcloud
 import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.View
 import android.view.ViewStub
 import android.widget.Button
@@ -26,7 +27,9 @@ class QuickMenuController(
     private val toggleDiscordEnabled: () -> Boolean,
     private val isDiscordEnabled: () -> Boolean,
     private val togglePreferIpv6: () -> Boolean,
-    private val isPreferIpv6: () -> Boolean
+    private val isPreferIpv6: () -> Boolean,
+    private val toggleLaunchOnRemotePlay: () -> Boolean,
+    private val isLaunchOnRemotePlay: () -> Boolean
 ) {
     private var container: FrameLayout? = null
     private var panel: View? = null
@@ -34,6 +37,8 @@ class QuickMenuController(
     private var discordTitle: TextView? = null
     private var discordSubtitle: TextView? = null
     private var ipv6State: TextView? = null
+    private var launchRemotePlayState: TextView? = null
+    private var settingsPage: View? = null
     private var headerStatus: TextView? = null
     private var title: TextView? = null
     private var fullStatsText: TextView? = null
@@ -42,6 +47,14 @@ class QuickMenuController(
     private val casButtons = mutableMapOf<String, Button>()
     private val handler = Handler(Looper.getMainLooper())
     private val timeFormat = DateFormat.getTimeInstance(DateFormat.SHORT)
+    private data class DeviceStats(val ram: String, val thermal: String, val watts: String)
+    private val deviceStats = ExpiringValue(HEADER_INTERVAL_MS, { SystemClock.elapsedRealtime() }) {
+        DeviceStats(
+            ramStatus() ?: "--",
+            thermalStatus() ?: "--",
+            wattage()?.let { String.format("%.1f W", it) } ?: "--"
+        )
+    }
     private val refreshRunnable = object : Runnable {
         override fun run() {
             refreshStats()
@@ -88,6 +101,10 @@ class QuickMenuController(
 
     fun handleBack(): Boolean {
         if (statsPage?.visibility == View.VISIBLE) {
+            showSettingsPage()
+            return true
+        }
+        if (settingsPage?.visibility == View.VISIBLE) {
             showMainPage()
             return true
         }
@@ -111,6 +128,8 @@ class QuickMenuController(
         title = root.findViewById(R.id.quickMenuTitle)
         fullStatsText = root.findViewById(R.id.quickMenuFullStats)
         statsPage = root.findViewById(R.id.quickMenuStatsPage)
+        settingsPage = root.findViewById(R.id.quickMenuSettingsPage)
+        launchRemotePlayState = root.findViewById(R.id.quickMenuLaunchRemotePlayState)
         mainPage = root.findViewById(R.id.quickMenuMainPage)
         ipv6State = root.findViewById(R.id.quickMenuIpv6State)
 
@@ -125,8 +144,14 @@ class QuickMenuController(
             toggleDiscordEnabled()
             updateDiscordLabel()
         }
+        root.findViewById<View>(R.id.quickMenuSettingsCard).setOnClickListener { showSettingsPage() }
+        root.findViewById<Button>(R.id.quickMenuSettingsBack).setOnClickListener { showMainPage() }
         root.findViewById<View>(R.id.quickMenuStatsCard).setOnClickListener { showStatsPage() }
-        root.findViewById<Button>(R.id.quickMenuStatsBack).setOnClickListener { showMainPage() }
+        root.findViewById<Button>(R.id.quickMenuStatsBack).setOnClickListener { showSettingsPage() }
+        root.findViewById<View>(R.id.quickMenuLaunchRemotePlay).setOnClickListener {
+            toggleLaunchOnRemotePlay()
+            updateLaunchRemotePlayState()
+        }
         root.findViewById<View>(R.id.quickMenuIpv6).setOnClickListener {
             togglePreferIpv6()
             updateIpv6State()
@@ -194,11 +219,30 @@ class QuickMenuController(
         )
     }
 
+    private fun updateLaunchRemotePlayState() {
+        val enabled = isLaunchOnRemotePlay()
+        launchRemotePlayState?.text = if (enabled) "On" else "Off"
+        launchRemotePlayState?.setTextColor(if (enabled) Color.WHITE else Color.rgb(210, 210, 210))
+        launchRemotePlayState?.setBackgroundResource(
+            if (enabled) R.drawable.quick_menu_segment_selected else R.drawable.quick_menu_segment
+        )
+    }
+
+    private fun showSettingsPage() {
+        mainPage?.visibility = View.GONE
+        statsPage?.visibility = View.GONE
+        settingsPage?.visibility = View.VISIBLE
+        title?.text = "Stream Settings"
+        updateIpv6State()
+        updateLaunchRemotePlayState()
+        scheduleRefresh()
+    }
+
     private fun showStatsPage() {
         mainPage?.visibility = View.GONE
         statsPage?.visibility = View.VISIBLE
+        settingsPage?.visibility = View.GONE
         title?.text = "Stream Stats"
-        updateIpv6State()
         refreshStats()
         scheduleRefresh()
     }
@@ -206,6 +250,7 @@ class QuickMenuController(
     private fun showMainPage() {
         mainPage?.visibility = View.VISIBLE
         statsPage?.visibility = View.GONE
+        settingsPage?.visibility = View.GONE
         title?.text = "Quick Menu"
         scheduleRefresh()
     }
@@ -234,9 +279,7 @@ class QuickMenuController(
                 // that neither has a readable data source without root (/proc/stat has been
                 // blocked to third-party apps since Android 7; the kgsl sysfs files were
                 // denied even to adb shell). See AGENTS.md "Power Profile".
-                val ram = ramStatus() ?: "--"
-                val thermal = thermalStatus() ?: "--"
-                val watts = wattage()?.let { String.format("%.1f W", it) } ?: "--"
+                val device = deviceStats.get()
                 // Count of IPv6 candidates the server offered in its last ICE response;
                 // null until a stream has connected in this document.
                 val serverIpv6 = when (val count = stats.opt("serverIpv6Candidates")) {
@@ -250,9 +293,9 @@ class QuickMenuController(
                     "Playback state  $state\n" +
                     "Total frames    $total\n" +
                     "CAS mode        ${casMode.replaceFirstChar { it.uppercase() }}\n" +
-                    "RAM used        $ram\n" +
-                    "Thermal status  $thermal\n" +
-                    "Power draw      $watts\n" +
+                    "RAM used        ${device.ram}\n" +
+                    "Thermal status  ${device.thermal}\n" +
+                    "Power draw      ${device.watts}\n" +
                     "Server IPv6     $serverIpv6\n" +
                     "Connection      $connection"
                 if (fullStatsText?.text != text) fullStatsText?.text = text

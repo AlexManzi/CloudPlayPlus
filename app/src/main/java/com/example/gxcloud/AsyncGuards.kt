@@ -1,5 +1,21 @@
 package com.example.gxcloud
 
+internal class ExpiringValue<T>(
+    private val intervalMillis: Long,
+    private val now: () -> Long,
+    private val load: () -> T
+) {
+    private data class Sample<T>(val timestamp: Long, val value: T)
+    private var sample: Sample<T>? = null
+
+    fun get(): T {
+        val timestamp = now()
+        val previous = sample
+        if (previous != null && timestamp - previous.timestamp < intervalMillis) return previous.value
+        return load().also { sample = Sample(timestamp, it) }
+    }
+}
+
 // Main-thread state only; worker results return to the main thread before completion.
 internal class SaveRevisionTracker {
     private var revision = 0L

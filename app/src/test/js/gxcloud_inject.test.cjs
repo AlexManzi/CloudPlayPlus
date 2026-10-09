@@ -8,7 +8,7 @@ const source = readFileSync(resolve(__dirname, '../../main/res/raw/gxcloud_injec
 
 // A small browser harness exercises the injected script's public entry points.
 // Mutation delivery is deferred, as in the browser, so reparenting is atomic.
-function browser(mode = 'off', { attached = true, webgl = true, fetch, preferIpv6, RTCPeerConnection, videoWidth = 1920 } = {}) {
+function browser(mode = 'off', { attached = true, webgl = true, glOverrides = {}, rafThrows = false, canvas2d = true, fetch, preferIpv6, RTCPeerConnection, videoWidth = 1920 } = {}) {
     const observers = new Set();
     const pending = new Map();
     const timers = new Map();
@@ -16,6 +16,8 @@ function browser(mode = 'off', { attached = true, webgl = true, fetch, preferIpv
     const vfc = new Map();
     const draws = [];
     const drawSizes = [];
+    const created = [];
+    let canvas2dRequests = 0;
     let id = 0;
     let lostContexts = 0;
     let documentQueries = 0;
@@ -40,6 +42,16 @@ function browser(mode = 'off', { attached = true, webgl = true, fetch, preferIpv
             this.listeners = new Map();
             this.width = 300;
             this.height = 150;
+        }
+        get width() { return this._width; }
+        set width(value) { this._width = value; this.resetDrawingState(); }
+        get height() { return this._height; }
+        set height(value) { this._height = value; this.resetDrawingState(); }
+        resetDrawingState() {
+            if (this.context2d) {
+                this.context2d.imageSmoothingEnabled = true;
+                this.context2d.globalCompositeOperation = 'source-over';
+            }
         }
         get parentElement() { return this.parentNode; }
         get nodeType() { return 1; }
@@ -78,13 +90,19 @@ function browser(mode = 'off', { attached = true, webgl = true, fetch, preferIpv
         }
         closest() { return this.parentNode; }
         getContext(type) {
-            if (type === '2d') return { drawImage: (_, x, y, width, height) => {
-                draws.push('bridge');
-                drawSizes.push([width, height]);
-            } };
-            if (!webgl) return null;
+            if (type === '2d') {
+                canvas2dRequests++;
+                if (!(typeof canvas2d === 'function' ? canvas2d() : canvas2d)) return null;
+                if (!this.context2d) this.context2d = { drawImage: (_, x, y, width, height) => {
+                    draws.push('bridge');
+                    drawSizes.push([width, height]);
+                } };
+                return this.context2d;
+            }
+            if (!(typeof webgl === 'function' ? webgl() : webgl)) return null;
             return new Proxy({}, {
                 get: (_, key) => {
+                    if (key in glOverrides) return glOverrides[key];
                     if (/^[A-Z_0-9]+$/.test(key)) return key;
                     if (key === 'getShaderParameter' || key === 'getProgramParameter') return () => true;
                     if (key === 'getExtension') return () => ({ loseContext() { lostContexts++; } });
@@ -109,7 +127,7 @@ function browser(mode = 'off', { attached = true, webgl = true, fetch, preferIpv
             this.paused = false;
             this.ended = false;
         }
-        play() { this.paused = false; return Promise.resolve(); }
+        play() { this.playCalls = (this.playCalls ?? 0) + 1; this.paused = false; return Promise.resolve(); }
         requestVideoFrameCallback(callback) { vfc.set(++id, callback); return id; }
         cancelVideoFrameCallback(handle) { vfc.delete(handle); }
     }
@@ -123,7 +141,11 @@ function browser(mode = 'off', { attached = true, webgl = true, fetch, preferIpv
     document.head = document.documentElement.appendChild(new Element('HEAD'));
     document.body = document.documentElement.appendChild(new Element('BODY'));
     document.hidden = false;
-    document.createElement = tag => new Element(tag.toUpperCase());
+    document.createElement = tag => {
+        const element = new Element(tag.toUpperCase());
+        created.push(element);
+        return element;
+    };
     const menu = document.body.appendChild(new Element('DIV'));
     const toggle = menu.appendChild(new Element('BUTTON'));
     toggle.ariaLabel = 'Quick actions toggle';
@@ -149,7 +171,10 @@ function browser(mode = 'off', { attached = true, webgl = true, fetch, preferIpv
     runInNewContext(source, {
         window, document, HTMLMediaElement: Video, HTMLVideoElement: Video,
         MutationObserver: Observer,
-        requestAnimationFrame: callback => { raf.set(++id, callback); return id; },
+        requestAnimationFrame: callback => {
+            if (rafThrows) throw new Error('Scheduling failed');
+            raf.set(++id, callback); return id;
+        },
         cancelAnimationFrame: handle => raf.delete(handle),
         setTimeout: (callback, delay) => { timers.set(++id, { callback, delay }); return id; },
         clearTimeout: handle => timers.delete(handle)
@@ -162,7 +187,8 @@ function browser(mode = 'off', { attached = true, webgl = true, fetch, preferIpv
         }
     }
     return {
-        window, document, video, streamContainer, Element, observers, timers, raf, vfc, draws, drawSizes, flush,
+        window, document, video, streamContainer, Element, observers, timers, raf, vfc, draws, drawSizes, flush, created,
+        get canvas2dRequests() { return canvas2dRequests; },
         get lostContexts() { return lostContexts; },
         get documentQueries() { return documentQueries; },
         menu, toggle,
@@ -193,6 +219,136 @@ test('initial Off has no canvas, render loop, or liveness timer', () => {
     for (const observer of b.observers) {
         for (const options of observer.targets.values()) assert.equal(options.subtree, undefined);
     }
+});
+
+
+for (const [name, failure] of [
+    ['throwing context allocation', { webgl: () => { throw new Error('Allocation failed'); } }],
+    ['null shader allocation', { glOverrides: { createShader: () => null } }],
+    ['null program allocation', { glOverrides: { createProgram: () => null } }],
+    ['null vertex array allocation', { glOverrides: { createVertexArray: () => null } }],
+    ['null buffer allocation', { glOverrides: { createBuffer: () => null } }],
+    ['null texture allocation', { glOverrides: { createTexture: () => null } }],
+    ['throwing shader setup', { glOverrides: { shaderSource: () => { throw new Error('Shader setup failed'); } } }],
+    ['throwing texture setup', { glOverrides: { texImage2D: () => { throw new Error('Texture setup failed'); } } }],
+    ['throwing failure cleanup', { glOverrides: {
+        createShader: () => null,
+        getExtension: () => ({ loseContext: () => { throw new Error('Cleanup failed'); } })
+    } }],
+    ['throwing frame scheduling', { rafThrows: true }]
+]) {
+    test(`CAS ${name} restores direct video and cannot block native play`, async () => {
+        const b = browser('normal', failure);
+        assert.notEqual(b.video.style.visibility, 'hidden');
+        assert.equal(b.video.dataset.casSetup, undefined);
+        assert.equal(b.video._casCleanup, undefined);
+        assert.equal(b.canvases().length, 0);
+        assert.equal(b.raf.size, 0);
+        assert.equal(b.vfc.size, 0);
+        assert.equal(b.window.__gxcloudGetStreamStats().state, 'Playing');
+        const replacement = new b.video.constructor();
+        replacement.paused = !failure.rafThrows;
+        b.streamContainer.appendChild(replacement);
+        await replacement.play();
+        assert.equal(replacement.paused, false);
+        assert.equal(replacement.playCalls, 1);
+        assert.notEqual(replacement.style.visibility, 'hidden');
+        assert.equal(b.canvases().length, 0);
+        replacement.emit('ended');
+        assert.equal(replacement.dataset.gxBound, undefined);
+        assert.equal(b.timers.size, 0);
+        for (const element of b.created.filter(e => e.context2d)) {
+            assert.equal(element.width, 1);
+            assert.equal(element.height, 1);
+        }
+    });
+}
+
+test('CAS can retry successfully after a WebGL setup exception', () => {
+    const glOverrides = { shaderSource: () => { throw new Error('Setup failed'); } };
+    const b = browser('normal', { glOverrides });
+    assert.equal(b.canvases().length, 0);
+    delete glOverrides.shaderSource;
+    b.window.__gxcloudSetCasMode('high');
+    assert.equal(b.canvases().length, 1);
+    b.frame();
+    assert.deepEqual(b.draws, ['bridge', 'upload', 'draw']);
+    b.video.emit('ended');
+    assert.equal(b.canvases().length, 0);
+    assert.equal(b.raf.size, 0);
+    assert.equal(b.vfc.size, 0);
+});
+
+test('Off defers bridge allocation until CAS is selected and reuses it across modes', () => {
+    const b = browser('off');
+    assert.equal(b.canvas2dRequests, 0);
+    assert.equal(b.created.filter(e => e.tagName === 'CANVAS').length, 0);
+    b.window.__gxcloudSetCasMode('normal');
+    const bridge = b.created.find(e => e.context2d);
+    assert.ok(bridge);
+    assert.equal(b.canvas2dRequests, 1);
+    b.window.__gxcloudSetCasMode('high');
+    assert.equal(b.canvas2dRequests, 1);
+    assert.equal(b.created.filter(e => e.context2d).length, 1);
+});
+
+for (const throws of [false, true]) {
+    test(`a ${throws ? 'throwing' : 'null'} bridge context preserves stats, IPv6 hooks, and direct video`, () => {
+        const b = browser('normal', { canvas2d: () => {
+            if (throws) throw new Error('Allocation failed');
+            return false;
+        } });
+        assert.equal(b.window.__gxcloudInjected, true);
+        assert.equal(b.window.__gxcloudGetStreamStats().state, 'Playing');
+        assert.equal(typeof b.window.__gxcloudSetPreferIpv6, 'function');
+        b.window.__gxcloudSetPreferIpv6(true);
+        assert.notEqual(b.video.style.visibility, 'hidden');
+        assert.equal(b.video.dataset.casSetup, undefined);
+        assert.equal(b.canvases().length, 0);
+        assert.equal(b.raf.size, 0);
+        b.video.emit('ended');
+        assert.equal(b.video.dataset.gxBound, undefined);
+    });
+}
+
+test('bridge allocation can retry on a later CAS selection', () => {
+    let available = false;
+    const b = browser('normal', { canvas2d: () => available });
+    assert.equal(b.canvases().length, 0);
+    available = true;
+    b.window.__gxcloudSetCasMode('high');
+    assert.equal(b.canvases().length, 1);
+    b.frame();
+    assert.deepEqual(b.drawSizes.at(-1), [1920, 1080]);
+});
+
+test('context loss releases bridge storage and restoration reuses it with correct drawing state', () => {
+    const b = browser('normal');
+    const bridge = b.created.find(e => e.context2d);
+    const canvas = b.canvases()[0];
+    canvas.emit('webglcontextlost');
+    assert.equal(bridge.width, 1);
+    assert.equal(bridge.height, 1);
+    assert.equal(bridge.context2d.imageSmoothingEnabled, false);
+    assert.equal(bridge.context2d.globalCompositeOperation, 'copy');
+    assert.equal(b.raf.size, 0);
+    assert.notEqual(b.video.style.visibility, 'hidden');
+    b.video.videoWidth = 1280;
+    b.video.videoHeight = 720;
+    canvas.emit('webglcontextrestored');
+    assert.equal(b.created.filter(e => e.context2d).length, 1);
+    assert.equal(bridge.width, 1280);
+    assert.equal(bridge.height, 720);
+    assert.equal(bridge.context2d.imageSmoothingEnabled, false);
+    assert.equal(bridge.context2d.globalCompositeOperation, 'copy');
+    b.frame();
+    assert.deepEqual(b.drawSizes.at(-1), [1280, 720]);
+    b.canvases()[0].emit('webglcontextlost');
+    b.video.emit('ended');
+    assert.equal(bridge.width, 1);
+    assert.equal(bridge.height, 1);
+    canvas.emit('webglcontextrestored');
+    assert.equal(b.canvases().length, 0);
 });
 
 test('Quick Actions ignores unrelated mutations and re-hides nested replacements once per batch', () => {
@@ -484,7 +640,8 @@ test('Prefer IPv6 off, or toggled off at runtime, leaves the ICE exchange untouc
     b.window.__gxcloudSetPreferIpv6(false);
     const response = await b.window.fetch('https://example.test/v5/sessions/cloud/ABC/ice');
     assert.deepEqual(await priorities(response), ['2130706431 20.1.2.3 9002', '1 2603:1030::5 9002', '']);
-    // Still observed, so the stats page can say whether IPv6 was on offer.
+    // Still observed asynchronously, without delaying response delivery.
+    await settle();
     assert.equal(b.window.__gxcloudGetStreamStats().serverIpv6Candidates, 1);
 });
 
@@ -508,6 +665,102 @@ function remotePlayFetch(serverDetails, candidates = serverCandidates()) {
 }
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
+test('IPv6 Off returns the native response before its cloned body finishes, even when toggled on later', async () => {
+    let finishBody;
+    const body = new Promise(resolve => { finishBody = resolve; });
+    const response = iceResponse(serverCandidates());
+    response.clone = () => ({ json: () => body });
+    const originalJson = response.json;
+    const nativeResult = Promise.resolve(response);
+    const b = browser('off', { preferIpv6: false, fetch: () => nativeResult });
+    const result = b.window.fetch('https://example.test/sessions/cloud/ABC/ice');
+    assert.equal(result, nativeResult);
+    assert.equal(await result, response);
+    assert.equal(b.window.__gxcloudGetStreamStats().serverIpv6Candidates, null);
+    b.window.__gxcloudSetPreferIpv6(true);
+    finishBody({ exchangeResponse: JSON.stringify(serverCandidates()) });
+    await settle();
+    assert.equal(b.window.__gxcloudGetStreamStats().serverIpv6Candidates, 1);
+    assert.equal(response.json, originalJson);
+    assert.deepEqual(await priorities(response), ['2130706431 20.1.2.3 9002', '1 2603:1030::5 9002', '']);
+});
+
+test('late Off observation cannot replace newer ICE candidate counts', async () => {
+    let finishOld;
+    const oldBody = new Promise(resolve => { finishOld = resolve; });
+    const oldResponse = iceResponse(serverCandidates());
+    oldResponse.clone = () => ({ json: () => oldBody });
+    const b = browser('off', { preferIpv6: false, fetch: url => Promise.resolve(
+        url.includes('/OLD/') ? oldResponse : iceResponse(serverCandidates())
+    ) });
+    await b.window.fetch('https://example.test/sessions/cloud/OLD/ice');
+    await b.window.fetch('https://example.test/sessions/cloud/NEW/ice');
+    await settle();
+    assert.equal(b.window.__gxcloudGetStreamStats().serverIpv6Candidates, 1);
+    finishOld({ exchangeResponse: JSON.stringify([...serverCandidates(), { candidate: 'a=candidate:9 1 UDP 1 2601::9 9002 typ host' }]) });
+    await settle();
+    assert.equal(b.window.__gxcloudGetStreamStats().serverIpv6Candidates, 1);
+});
+
+test('failed Off observation preserves response delivery and does not reject in the background', async () => {
+    const response = iceResponse(serverCandidates());
+    response.clone = () => ({ json: () => Promise.reject(new Error('Invalid body')) });
+    const b = browser('off', { preferIpv6: false, fetch: async () => response });
+    assert.equal(await b.window.fetch('https://example.test/sessions/cloud/ABC/ice'), response);
+    await settle();
+    assert.equal(b.window.__gxcloudGetStreamStats().serverIpv6Candidates, null);
+});
+
+test('real Response clones and recursive clones preserve rewritten JSON/text and metadata', async () => {
+    const native = new Response(JSON.stringify({ exchangeResponse: JSON.stringify(serverCandidates()) }), {
+        status: 201, statusText: 'Created', headers: { 'Content-Type': 'application/json', 'X-Test': 'kept' }
+    });
+    const b = browser('off', { preferIpv6: true, fetch: async () => native });
+    const response = await b.window.fetch('https://example.test/sessions/cloud/ABC/ice');
+    assert.equal(response, native);
+    const clone = response.clone();
+    const recursive = clone.clone();
+    const expectedText = await response.text();
+    const expected = JSON.parse(expectedText);
+    assert.equal(JSON.stringify(await clone.json()), expectedText);
+    assert.equal(await recursive.text(), expectedText);
+    assert.equal(clone.status, 201);
+    assert.equal(clone.statusText, 'Created');
+    assert.equal(clone.headers.get('X-Test'), 'kept');
+    assert.equal(clone.url, native.url);
+    assert.equal(clone.bodyUsed, false);
+    const candidates = JSON.parse(expected.exchangeResponse);
+    assert.equal(candidates[1].candidate.split(' ')[3], '2130706431');
+    await recursive.arrayBuffer(); // Preserve native clone validation after consuming its body.
+    assert.throws(() => recursive.clone(), TypeError);
+});
+
+test('candidate partitioning preserves malformed entries, wire order, and relative priority within families', async () => {
+    const candidates = [
+        { candidate: 'a=candidate:1 1 UDP 4 20.1.2.3 9002 typ host' },
+        { candidate: 'unparseable', marker: 'keep' },
+        { candidate: 'a=candidate:2 1 UDP 5 2601::2 9002 typ host' },
+        { candidate: 'a=candidate:3 1 UDP 9 20.1.2.4 9002 typ host' },
+        { candidate: 'a=candidate:4 1 UDP 8 2601::4 9002 typ host' },
+        { candidate: 'a=end-of-candidates' }
+    ];
+    const b = browser('off', { preferIpv6: true, fetch: async () => iceResponse(candidates) });
+    const response = await b.window.fetch('https://example.test/sessions/cloud/ABC/ice');
+    const ranked = JSON.parse((await response.json()).exchangeResponse);
+    assert.deepEqual(ranked.map(c => c.candidate.split(' ')[3]), ['999', undefined, '2130706430', '1000', '2130706431', undefined]);
+    assert.deepEqual(ranked[1], candidates[1]);
+    assert.equal(ranked.at(-1).candidate, 'a=end-of-candidates');
+    assert.equal(b.window.__gxcloudGetStreamStats().serverIpv6Candidates, 2);
+});
+
+test('stream stats omit the unused dropped-frame payload', () => {
+    const b = browser('off');
+    b.video.getVideoPlaybackQuality = () => ({ totalVideoFrames: 42 });
+    const stats = b.window.__gxcloudGetStreamStats();
+    assert.equal(stats.totalFrames, '42');
+    assert.equal('droppedFrames' in stats, false);
+});
+
 test('Remote Play adds the console IPv6 address before end-of-candidates, only when on and not already listed', async () => {
     const details = { ipV4Address: '98.1.2.3', ipV4Port: 9002, ipV6Address: '2601:aa::7', ipV6Port: 1234 };
     const on = browser('off', { preferIpv6: true, fetch: remotePlayFetch(details) });
@@ -518,7 +771,7 @@ test('Remote Play adds the console IPv6 address before end-of-candidates, only w
         '1000 20.1.2.3 9002', '2130706431 2603:1030::5 9002',
         '2130706430 2601:aa::7 1234', '2130706429 2601:aa::7 9002', ''
     ]);
-    assert.equal(on.window.__gxcloudGetStreamStats().serverIpv6Candidates, 3);
+    assert.equal(on.window.__gxcloudGetStreamStats().serverIpv6Candidates, 1);
 
     // A cloud session never receives a Remote Play console's address.
     const cloud = await on.window.fetch('https://example.test/v5/sessions/cloud/ABC/ice');
@@ -529,13 +782,68 @@ test('Remote Play adds the console IPv6 address before end-of-candidates, only w
     await settle();
     const untouched = await off.window.fetch('https://example.test/v5/sessions/home/ABC/ice');
     assert.deepEqual(await priorities(untouched), ['2130706431 20.1.2.3 9002', '1 2603:1030::5 9002', '']);
-    assert.equal(off.window.__gxcloudGetStreamStats().serverIpv6Candidates, 3);
+    await settle();
+    assert.equal(off.window.__gxcloudGetStreamStats().serverIpv6Candidates, 1);
 
     const listed = browser('off', { preferIpv6: true, fetch: remotePlayFetch({ ipV6Address: '2603:1030::5', ipV6Port: 9002 }) });
     await listed.window.fetch('https://example.test/v5/sessions/home/ABC/configuration');
     await settle();
     const deduped = await listed.window.fetch('https://example.test/v5/sessions/home/ABC/ice');
     assert.equal((await priorities(deduped)).length, 3);
+});
+
+test('Remote Play never reuses another session\'s console address without matching configuration', async () => {
+    const b = browser('off', { preferIpv6: true, fetch: remotePlayFetch({ ipV6Address: '2601:aa::7', ipV6Port: 9002 }) });
+    await b.window.fetch('https://example.test/v5/sessions/home/OLD/configuration');
+    await settle();
+    const response = await b.window.fetch('https://example.test/v5/sessions/home/NEW/ice');
+    const candidates = JSON.parse((await response.json()).exchangeResponse);
+    assert.equal(candidates.length, serverCandidates().length);
+    assert.ok(candidates.every(c => !c.candidate.includes('2601:aa::7')));
+});
+
+for (const sameSession of [false, true]) {
+    for (const fails of [false, true]) {
+        test(`late ${fails ? 'failed' : 'successful'} Remote Play configuration cannot replace newer ${sameSession ? 'same-session' : 'session'} data`, async () => {
+            let finishOld;
+            const oldBody = new Promise((resolve, reject) => {
+                finishOld = fails ? () => reject(new Error('Old response failed'))
+                    : () => resolve({ serverDetails: { ipV6Address: '2601:aa::7', ipV6Port: 9002 } });
+            });
+            let configurationRequests = 0;
+            const b = browser('off', { preferIpv6: true, fetch: url => Promise.resolve(
+                url.includes('/configuration')
+                    ? { ok: true, clone: () => ({ json: () => ++configurationRequests === 1 ? oldBody
+                        : Promise.resolve({ serverDetails: { ipV6Address: '2601:bb::8', ipV6Port: 9002 } }) }) }
+                    : iceResponse(serverCandidates())
+            ) });
+            await b.window.fetch('https://example.test/v5/sessions/home/OLD/configuration');
+            const session = sameSession ? 'OLD' : 'NEW';
+            await b.window.fetch(`https://example.test/v5/sessions/home/${session}/configuration?retry=1`);
+            await settle();
+            finishOld();
+            await settle();
+            const response = await b.window.fetch(`https://example.test/v5/sessions/home/${session}/ice?poll=1`);
+            const candidates = JSON.parse((await response.json()).exchangeResponse);
+            assert.ok(candidates.some(c => c.candidate.includes('2601:bb::8')));
+            assert.ok(candidates.every(c => !c.candidate.includes('2601:aa::7')));
+        });
+    }
+}
+
+test('a failed configuration refresh clears the previous console address', async () => {
+    let configurationRequests = 0;
+    const b = browser('off', { preferIpv6: true, fetch: url => Promise.resolve(
+        url.endsWith('/configuration')
+            ? { ok: ++configurationRequests === 1, clone: () => ({ json: async () => ({ serverDetails: { ipV6Address: '2601:aa::7', ipV6Port: 9002 } }) }) }
+            : iceResponse(serverCandidates())
+    ) });
+    await b.window.fetch('https://example.test/v5/sessions/home/ABC/configuration');
+    await settle();
+    await b.window.fetch('https://example.test/v5/sessions/home/ABC/configuration');
+    await settle();
+    const response = await b.window.fetch('https://example.test/v5/sessions/home/ABC/ice');
+    assert.equal(JSON.parse((await response.json()).exchangeResponse).length, serverCandidates().length);
 });
 
 test('stats report the selected pair as IPv4/IPv6 and direct/relay, one poll behind', async () => {
@@ -708,4 +1016,41 @@ test('late full stats cannot overwrite a newly available selected-pair result', 
     await settle();
     resolveStats(new Map());
     await settle();
+});
+
+
+test('Off counting matches enabled server counts and ignores malformed candidates', async () => {
+    const candidates = [
+        ...serverCandidates(),
+        { candidate: 'a=candidate:3 1 UDP 4 2601::9 9999 typ host' },
+        { candidate: 'a=candidate:4 1 UDP nope 2601::9 9999 typ host' },
+        { candidate: 'a=candidate:5 1 UDP 4 2601::9' },
+        { candidate: 'a=end-of-candidates' },
+        { candidate: null }, null
+    ];
+    for (const enabled of [false, true]) {
+        const b = browser('off', { preferIpv6: enabled, fetch: remotePlayFetch(
+            { ipV6Address: '2601:aa::7', ipV6Port: 1234 }, candidates
+        ) });
+        await b.window.fetch('https://example.test/sessions/home/ABC/configuration');
+        await settle();
+        const response = await b.window.fetch('https://example.test/sessions/home/ABC/ice');
+        await settle();
+        assert.equal(b.window.__gxcloudGetStreamStats().serverIpv6Candidates, 2);
+        const received = JSON.parse((await response.json()).exchangeResponse);
+        assert.equal(received.length, candidates.length + (enabled ? 2 : 0));
+        if (!enabled) assert.deepEqual(received, candidates);
+    }
+});
+
+test('console-only IPv6 is ranked but is not reported as offered by the server', async () => {
+    const candidates = serverCandidates().filter(c => !c.candidate.includes('2603:'));
+    const b = browser('off', { preferIpv6: true, fetch: remotePlayFetch(
+        { ipV6Address: '2601:aa::7', ipV6Port: 9002 }, candidates
+    ) });
+    await b.window.fetch('https://example.test/sessions/home/ABC/configuration');
+    await settle();
+    const response = await b.window.fetch('https://example.test/sessions/home/ABC/ice');
+    assert.equal(b.window.__gxcloudGetStreamStats().serverIpv6Candidates, 0);
+    assert.equal(JSON.parse((await response.json()).exchangeResponse).length, candidates.length + 1);
 });

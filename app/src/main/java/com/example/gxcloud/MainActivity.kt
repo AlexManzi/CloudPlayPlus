@@ -46,6 +46,8 @@ class MainActivity : AppCompatActivity() {
     // Persisted, unlike casMode: it's a property of the user's networks, not a
     // per-session look, so it should survive an app restart.
     private var preferIpv6 = false
+    private var launchOnRemotePlay = false
+    private var launchUrl = XBOX_URL
     private val prefs by lazy { getSharedPreferences(PREFS_NAME, MODE_PRIVATE) }
     private var resumed = false
     private lateinit var discordController: DiscordController
@@ -61,6 +63,13 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         casMode = normalizeCasMode(savedInstanceState?.getString("casMode"))
         preferIpv6 = prefs.getBoolean(PREF_PREFER_IPV6, false)
+        launchOnRemotePlay = prefs.getBoolean(PREF_LAUNCH_REMOTE_PLAY, false)
+        // Freeze this session's destination; changing the preference affects the next launch.
+        launchUrl = launchDestination.resolve(
+            launchOnRemotePlay,
+            savedInstanceState?.getString("launchUrl"),
+            savedInstanceState?.getString("launchProcessToken")
+        )
 
         // Keep screen on while gaming
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -150,9 +159,7 @@ class MainActivity : AppCompatActivity() {
             toggleDiscordEnabled = {
                 val enabled = !discordController.enabled
                 discordController.enabled = enabled
-                // Turning the feature off must also release an already-open Discord
-                // WebView; when on, the existing four-tap gesture is the only opener.
-                if (!enabled && discordController.isVisible) discordController.close()
+                // The controller destroys its WebView on disable; enabling stays lazy.
                 enabled
             },
             isDiscordEnabled = { discordController.enabled },
@@ -162,11 +169,17 @@ class MainActivity : AppCompatActivity() {
                 webView?.evaluateJavascript("window.__gxcloudSetPreferIpv6&&window.__gxcloudSetPreferIpv6($preferIpv6)", null)
                 preferIpv6
             },
-            isPreferIpv6 = { preferIpv6 }
+            isPreferIpv6 = { preferIpv6 },
+            toggleLaunchOnRemotePlay = {
+                launchOnRemotePlay = !launchOnRemotePlay
+                prefs.edit().putBoolean(PREF_LAUNCH_REMOTE_PLAY, launchOnRemotePlay).apply()
+                launchOnRemotePlay
+            },
+            isLaunchOnRemotePlay = { launchOnRemotePlay }
         )
         configureWebView(webView!!)
         setupBackHandler()
-        webView?.loadUrl(XBOX_URL)
+        webView?.loadUrl(launchUrl)
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -291,7 +304,7 @@ class MainActivity : AppCompatActivity() {
             replacement.resumeTimers()
             replacement.onResume()
             replacement.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
-            replacement.loadUrl(XBOX_URL)
+            replacement.loadUrl(launchUrl)
             if (!quickMenuController.isVisible && !notesController.isVisible) replacement.requestFocus()
         }
         recoveryView = recovery
@@ -300,6 +313,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString("casMode", casMode)
+        outState.putString("launchUrl", launchUrl)
+        outState.putString("launchProcessToken", launchDestination.processToken)
         super.onSaveInstanceState(outState)
     }
 
@@ -381,6 +396,8 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("GestureBackNavigation")
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.keyCode == KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
+        // Let the focused native editor handle typing and deletion before Xbox.
+        if (notesController.isVisible) return super.dispatchKeyEvent(event)
         // Normal dispatch already reaches the focused WebView. Forwarding first can
         // deliver an unhandled controller event to it twice through the fallback.
         if (webView?.hasFocus() == true && (
@@ -511,11 +528,13 @@ class MainActivity : AppCompatActivity() {
     private var suppressQuickMenuGesture = false
 
     private companion object {
-        const val XBOX_URL = "https://play.xbox.com/"
+        const val XBOX_URL = LaunchDestination.CLOUD_URL
+        val launchDestination = LaunchDestination()
         const val QUICK_MENU_FINGERS = 4
         const val QUICK_MENU_GESTURE_WINDOW_MS = 300L
         const val PREFS_NAME = "gxcloud"
         const val PREF_PREFER_IPV6 = "preferIpv6"
+        const val PREF_LAUNCH_REMOTE_PLAY = "launchOnRemotePlay"
     }
 
     private fun prepareInjectionScript() {

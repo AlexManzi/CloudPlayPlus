@@ -4,6 +4,37 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AsyncGuardsTest {
+    @Test fun deviceSamplesRefreshEveryFiveSecondsIncludingAfterAHiddenInterval() {
+        var time = 0L
+        var reads = 0
+        val cache = ExpiringValue(5_000, { time }) { ++reads }
+        assertEquals(1, cache.get())
+        for (second in 1..4) {
+            time = second * 1_000L
+            assertEquals(1, cache.get())
+        }
+        time = 5_000
+        assertEquals(2, cache.get())
+        time = 60_000 // Reopening the page gets a fresh sample immediately.
+        assertEquals(3, cache.get())
+        assertEquals(3, reads)
+    }
+
+    @Test fun unavailableDeviceReadingsAreCachedUntilTheNextSample() {
+        var time = 0L
+        var reads = 0
+        val cache = ExpiringValue<String?>(5_000, { time }) {
+            reads++
+            if (reads == 1) null else "Normal"
+        }
+        assertNull(cache.get())
+        time = 1_000
+        assertNull(cache.get())
+        assertEquals(1, reads)
+        time = 5_000
+        assertEquals("Normal", cache.get())
+    }
+
     @Test fun documentInjectionSkipsDuplicatesButPermitsReloadAndRendererReplacement() {
         val gate = DocumentInjectionGate()
         assertTrue(gate.begin(1))

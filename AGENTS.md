@@ -5,6 +5,85 @@ was tried and rejected. Read this before suggesting changes.
 
 ---
 
+## Discord hidden-session lifetime — 2026-10-08
+
+- Disabling Discord destroys and detaches its WebView even when the panel is already
+  hidden, clears recovery UI and pending gesture counts, and retains only the lazy
+  panel shell. Enabling creates no WebView until an explicit open.
+- Hiding an enabled Discord panel only changes native visibility. It no longer
+  navigates to about:blank, pauses the view, or waives renderer priority. Reopening
+  reuses the loaded page without a fresh navigation; Activity pause/resume still
+  applies to hidden views and global timer handling is unchanged.
+- Microphone permission requests are deduplicated while pending. Their completion
+  can load the existing enabled view while hidden, but never recreates a disabled
+  view. Renderer loss resets the per-view load guard; recovery remains explicit.
+- This supersedes historical about:blank-on-close descriptions. On-device Discord
+  voice continuity and disable/re-enable behavior still require validation.
+
+## Runtime review follow-up — 2026-10-08
+
+- Stream Stats still requests playback/connection information each second. RAM,
+  thermal status, and power draw share a five-second cache sampled only by the
+  visible stats consumer. Reopening after expiry samples immediately; no timer added.
+- IPv6 Off counts server candidates directly without parsed records, family arrays,
+  or console synthesis. Enabled ranking retains the single partition pass. The
+  Server IPv6 count excludes locally synthesized console candidates in both modes;
+  synthesized candidates still participate in enabled connection ranking.
+- Notes field watchers copy only the changed field, retaining the editor-loading
+  guard, save revisions, and 600ms debounce. While Notes is open, key dispatch uses
+  normal Activity routing so Xbox cannot consume editor typing/deletion first.
+  Physical/IME Backspace behavior still needs device confirmation.
+- CAS setup catches exceptions and handles null GL resource allocation. Partial
+  setup removes its output, shrinks the bridge, restores direct video, and remains
+  retryable. Cleanup ownership is established before frame scheduling; failure cannot
+  prevent the original media play call. No per-frame exception wrapper or changes to
+  the measured upload/shader/cadence, watchdog, or scoped removal policy were added.
+- Regression tests cover cache expiry/unavailable values, server-only counts, GL
+  setup/scheduling/cleanup failures, continued native playback, and later CAS retry.
+
+## ICE response and CAS allocation update — 2026-10-08
+
+- With Prefer IPv6 Off, ICE fetch returns the original promise immediately. Candidate
+  counts come from asynchronous cloned-body reads; request identity prevents stale
+  counts replacing a newer connection. The preference is captured for each request.
+- Candidate parsing partitions IPv4/IPv6 once while retaining wire order. Enabled
+  responses and their recursive clones share rewritten `json()`/`text()` readers;
+  native metadata and clone validation remain. Other body readers retain native bytes.
+- The shared 2D bridge is allocated only when CAS needs it. Null/throwing allocation
+  leaves direct video, IPv6 hooks, and stats available and permits later CAS retries.
+  Pipeline detach, including context loss, shrinks the bridge to 1×1; successful setup
+  restores native dimensions and reapplies drawing state after dimension assignments.
+- Removed the unused dropped-frame field from the native stats payload. The measured
+  shader/upload/render cadence, watchdog, and scoped removal detection are unchanged.
+- JS regression tests cover deferred/stale/failed observations, real Response clones,
+  candidate ordering, allocation failure/retry, and bridge release/restoration.
+
+## Remote Play configuration isolation — 2026-10-08
+
+- Console IPv6 configuration is scoped to the Remote Play session ID and newest
+  configuration request. Late successes/failures cannot overwrite a newer session
+  or retry. A fresh configuration request clears its address until a valid read.
+- ICE requests capture matching configuration only; another session's console
+  address is never synthesized into their candidate list. One latest record keeps
+  storage bounded without adding timers or delaying configuration responses.
+- Saved Prefer IPv6 and Launch on remote play preferences are unchanged. JS tests
+  cover session mismatch, out-of-order successes/failures, and failed refreshes.
+
+## Stream Settings update — 2026-10-08
+
+- Quick Menu now opens Stream Settings: Prefer IPv6, Launch on remote play, then
+  Stream Stats. Stats has no toggle controls; Back moves Stats → Settings → Quick Menu.
+- Launch on remote play is saved in SharedPreferences, defaults Off, and chooses
+  `https://play.xbox.com/remoteplay` instead of `https://play.xbox.com/` on the next
+  fresh launch. Toggling does not navigate the current WebView. The session launch URL
+  survives Activity recreation and is reused for explicit renderer recovery, so a
+  changed preference cannot redirect the current session through those paths.
+- Saved launch URLs include a process token. Only same-process Activity recreation
+  reuses that URL; after process death, startup honors the current saved preference.
+  JVM regression tests cover both toggle directions and missing/invalid saved state.
+- Settings uses only the existing 5-second battery/clock refresh. Detailed stream
+  requests remain limited to the visible stats page at the existing 1-second interval.
+
 ## Injection pipeline update — 2026-10-06
 
 - Initial binding and CAS mode switches attempt CAS setup before installing an

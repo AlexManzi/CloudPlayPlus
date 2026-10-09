@@ -9,10 +9,35 @@
     const triVerts = new Float32Array([-1,-1,3,-1,-1,3]);
     const EMPTY_PIXEL = new Uint8Array([0,0,0,255]);
 
-    const bridge = document.createElement('canvas');
-    const bridgeCtx = bridge.getContext('2d', { alpha: false, willReadFrequently: false });
-    bridgeCtx.imageSmoothingEnabled = false;
-    bridgeCtx.globalCompositeOperation = 'copy';
+    // Allocate only when CAS is requested; keep the same bridge across pipelines.
+    let bridge = null;
+    let bridgeCtx = null;
+    const ensureBridge = () => {
+        if (bridgeCtx) return true;
+        try {
+            if (!bridge) {
+                bridge = document.createElement('canvas');
+                bridge.width = 1;
+                bridge.height = 1;
+            }
+            const context = bridge.getContext('2d', { alpha: false, willReadFrequently: false });
+            if (!context) return false;
+            context.imageSmoothingEnabled = false;
+            context.globalCompositeOperation = 'copy';
+            bridgeCtx = context;
+            return true;
+        } catch (_) { return false; }
+    };
+    const resetBridge = () => {
+        if (!bridge) return;
+        if (bridge.width !== 1) bridge.width = 1;
+        if (bridge.height !== 1) bridge.height = 1;
+        // Dimension assignments reset the 2D context's drawing state.
+        if (bridgeCtx) {
+            bridgeCtx.imageSmoothingEnabled = false;
+            bridgeCtx.globalCompositeOperation = 'copy';
+        }
+    };
 
     const style = document.createElement('style');
     style.textContent =
@@ -155,268 +180,287 @@
     const setupWebGLCAS = (video) => {
         if (casMode === 'off') return;
         if (video.dataset.casSetup) return;
+        if (!ensureBridge()) return;
         video.dataset.casSetup = 'true';
 
-        const canvas = document.createElement('canvas');
-        canvas.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;pointer-events:none;contain:strict;';
-        document.body.appendChild(canvas);
-        video.style.visibility = 'hidden';
+        let canvas = null;
+        let gl = null;
+        try {
+            canvas = document.createElement('canvas');
+            canvas.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;pointer-events:none;contain:strict;';
+            document.body.appendChild(canvas);
+            video.style.visibility = 'hidden';
 
-        // Unwind a partial setup completely, so the element stays eligible for a
-        // later acquisition event instead of being stuck with casSetup set and no
-        // pipeline behind it.
-        const abortSetup = (glCtx, program, shaders) => {
-            if (glCtx) {
-                if (shaders) for (const s of shaders) if (s) glCtx.deleteShader(s);
-                if (program) glCtx.deleteProgram(program);
-                glCtx.getExtension('WEBGL_lose_context')?.loseContext();
-            }
-            canvas.remove();
-            video.style.visibility = '';
-            delete video.dataset.casSetup;
-        };
+            // Unwind a partial setup completely, so the element stays eligible for a
+            // later acquisition event instead of being stuck with casSetup set and no
+            // pipeline behind it.
+            const abortSetup = (glCtx, program, shaders) => {
+                if (glCtx) {
+                    if (shaders) for (const s of shaders) if (s) glCtx.deleteShader(s);
+                    if (program) glCtx.deleteProgram(program);
+                    glCtx.getExtension('WEBGL_lose_context')?.loseContext();
+                }
+                canvas.remove();
+                video.style.visibility = '';
+                delete video.dataset.casSetup;
+            };
 
-        const gl = canvas.getContext('webgl2', { powerPreference: 'low-power', alpha: false, depth: false, stencil: false, preserveDrawingBuffer: false, antialias: false, desynchronized: true, premultipliedAlpha: false });
-        if (!gl) {
-            abortSetup(null, null, null);
-            return;
-        }
-
-        const vert = '#version 300 es\nin vec4 position;\nout vec2 vUV;\nvoid main(){gl_Position=position;vUV=vec2(position.x*0.5+0.5,0.5-position.y*0.5);}';
-        // %SHARPEN_FACTOR% is substituted below, not string-replaced against a tuned
-        // literal — a future retune of the normal-mode constant can't silently break
-        // high mode by no longer matching the old text.
-        const fragTemplate = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nin vec2 vUV;\nconst float sharpenFactor=%SHARPEN_FACTOR%;\nout vec4 fragColor;\nvoid main(){\n  vec3 e=texture(data,vUV).rgb;\n  vec3 b=textureOffset(data,vUV,ivec2(0,1)).rgb;\n  vec3 d=textureOffset(data,vUV,ivec2(-1,0)).rgb;\n  vec3 f=textureOffset(data,vUV,ivec2(1,0)).rgb;\n  vec3 h=textureOffset(data,vUV,ivec2(0,-1)).rgb;\n  const vec3 lw=vec3(0.2126,0.7152,0.0722);\n  float le=dot(e,lw);float lb=dot(b,lw);float ld=dot(d,lw);float lf=dot(f,lw);float lh=dot(h,lw);\n  float mn_l=min(min(min(ld,le),min(lf,lb)),lh);\n  float mx_l=max(max(max(ld,le),max(lf,lb)),lh);\n  float amp=mn_l/(mx_l+0.01);\n  float wm=clamp((le-0.05)*2.2222,0.0,1.0);\n  float cg=clamp((mx_l-mn_l-0.005)*28.57,0.0,1.0);\n  float w=-(wm*cg)*(amp*0.2);\n  float rw=1.0/(4.0*w+1.0);\n  float detL=clamp(((lb+ld+lf+lh)*w+le)*rw,0.0,1.0)-le;\n  float satBoost=1.0+wm*0.18;\n  float sharpL=le+detL/(1.0+abs(detL)*4.0)*sharpenFactor*satBoost;\n  fragColor=vec4(clamp(vec3(sharpL)+(e-vec3(le))*satBoost,0.0,1.0),1.0);\n}';
-
-        const SHARPEN_FACTOR_NORMAL = '0.37';
-        const SHARPEN_FACTOR_HIGH = '1.0';
-        const fragSource = fragTemplate.replace(
-            '%SHARPEN_FACTOR%',
-            casMode === 'high' ? SHARPEN_FACTOR_HIGH : SHARPEN_FACTOR_NORMAL
-        );
-        const mkShader = (type, src) => {
-            const s = gl.createShader(type);
-            gl.shaderSource(s, src);
-            gl.compileShader(s);
-            if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-                gl.deleteShader(s);
-                return null;
-            }
-            return s;
-        };
-
-        const prog = gl.createProgram();
-        const vs = mkShader(gl.VERTEX_SHADER, vert);
-        const fs = mkShader(gl.FRAGMENT_SHADER, fragSource);
-        if (!vs || !fs) {
-            abortSetup(gl, prog, [vs, fs]);
-            return;
-        }
-        gl.attachShader(prog, vs);
-        gl.attachShader(prog, fs);
-        gl.linkProgram(prog);
-        gl.detachShader(prog, vs); gl.deleteShader(vs);
-        gl.detachShader(prog, fs); gl.deleteShader(fs);
-        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-            abortSetup(gl, prog, null);
-            return;
-        }
-        gl.useProgram(prog);
-        gl.disable(gl.BLEND);
-        gl.disable(gl.DITHER);
-
-        const vao = gl.createVertexArray();
-        gl.bindVertexArray(vao);
-
-        const buf = gl.createBuffer();
-        gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-        gl.bufferData(gl.ARRAY_BUFFER, triVerts, gl.STATIC_DRAW);
-        const posLoc = gl.getAttribLocation(prog, 'position');
-        gl.enableVertexAttribArray(posLoc);
-        gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
-
-        const tex = gl.createTexture();
-        gl.bindTexture(gl.TEXTURE_2D, tex);
-
-        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, EMPTY_PIXEL);
-        gl.activeTexture(gl.TEXTURE0);
-        gl.uniform1i(gl.getUniformLocation(prog, 'data'), 0);
-        // Runs synchronously on 'resize'. It used to be debounced 16ms, which left a
-        // frame where present() scaled the new stream resolution into the old bridge
-        // size — xCloud changes resolution mid-stream on network conditions, so that
-        // was a visible hitch every switch. Nothing to debounce: the event only fires
-        // when the dimensions actually changed, and the equality check below already
-        // absorbs any burst.
-        let drawWidth = bridge.width;
-        let drawHeight = bridge.height;
-        const _syncSize = () => {
-            const w = video.videoWidth;
-            const h = video.videoHeight;
-            if (!w || !h) return;
-            if (canvas.width === w && canvas.height === h) return;
-            canvas.width = bridge.width = w;
-            canvas.height = bridge.height = h;
-            drawWidth = w;
-            drawHeight = h;
-            // Resizing the bridge resets its 2D context to defaults — reapply
-            bridgeCtx.imageSmoothingEnabled = false;
-            bridgeCtx.globalCompositeOperation = 'copy';
-            gl.viewport(0, 0, w, h);
-        };
-        _syncSize();
-
-        video.addEventListener('loadedmetadata', _syncSize);
-        video.addEventListener('resize', _syncSize);
-
-        let frameHandle = null;
-        let vfcHandle = null;
-        const hasRVFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
-
-        const present = () => {
-            if (video.readyState < 2 || video.paused || document.hidden) return;
-            bridgeCtx.drawImage(video, 0, 0, drawWidth, drawHeight);
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bridge);
-            gl.drawArrays(gl.TRIANGLES, 0, 3);
-        };
-
-        // Draw the moment the frame is decoded. This used to set a flag that the
-        // next rAF tick acted on, which cost up to a full vsync of latency before
-        // the frame was even copied, and put the GPU work on the vsync critical
-        // path. Draw count is unchanged — rVFC fires exactly once per decoded
-        // frame, which is what the old flag gated on.
-        const onVFC = () => {
-            vfcHandle = null;
-            present();
-            if (!video.paused && !document.hidden)
-                vfcHandle = video.requestVideoFrameCallback(onVFC);
-        };
-
-        // Teardown detection has to survive a stopped loop. 'pause' and
-        // visibilitychange both cancel rAF, and the liveness check lives inside
-        // render() — so quitting a game or switching games left the last frame
-        // frozen under the opaque canvas with no path back to teardown. This only
-        // ticks while the loop is already stopped: zero cost while streaming.
-        let watchdog = null;
-        let watchdogDelay = 500;
-        const stopWatchdog = () => {
-            if (watchdog !== null) { clearTimeout(watchdog); watchdog = null; }
-            // Reset here, not in armWatchdog: stopWatchdog is the "loop is alive
-            // again" signal (scheduleFrame calls it on resume), so the next stall
-            // starts back at a fast 500ms first check.
-            watchdogDelay = 500;
-        };
-        const checkAlive = () => {
-            watchdog = null;
-            if (!video.srcObject || !document.contains(video) || video.ended) {
-                teardown(video);
+            gl = canvas.getContext('webgl2', { powerPreference: 'low-power', alpha: false, depth: false, stencil: false, preserveDrawingBuffer: false, antialias: false, desynchronized: true, premultipliedAlpha: false });
+            if (!gl) {
+                abortSetup(null, null, null);
                 return;
             }
-            // Paused-but-alive (srcObject intact, still in the DOM): nothing can
-            // change until an event fires, so don't keep polling at 2Hz forever —
-            // that was a permanent wakeup with nothing to do. Backs off
-            // 500 -> 1000 -> 2000 -> 4000 -> 5000ms. First check is still 500ms.
-            if (frameHandle === null) {
-                watchdogDelay = Math.min(watchdogDelay * 2, 5000);
-                watchdog = setTimeout(checkAlive, watchdogDelay);
+
+            const vert = '#version 300 es\nin vec4 position;\nout vec2 vUV;\nvoid main(){gl_Position=position;vUV=vec2(position.x*0.5+0.5,0.5-position.y*0.5);}';
+            // %SHARPEN_FACTOR% is substituted below, not string-replaced against a tuned
+            // literal — a future retune of the normal-mode constant can't silently break
+            // high mode by no longer matching the old text.
+            const fragTemplate = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nin vec2 vUV;\nconst float sharpenFactor=%SHARPEN_FACTOR%;\nout vec4 fragColor;\nvoid main(){\n  vec3 e=texture(data,vUV).rgb;\n  vec3 b=textureOffset(data,vUV,ivec2(0,1)).rgb;\n  vec3 d=textureOffset(data,vUV,ivec2(-1,0)).rgb;\n  vec3 f=textureOffset(data,vUV,ivec2(1,0)).rgb;\n  vec3 h=textureOffset(data,vUV,ivec2(0,-1)).rgb;\n  const vec3 lw=vec3(0.2126,0.7152,0.0722);\n  float le=dot(e,lw);float lb=dot(b,lw);float ld=dot(d,lw);float lf=dot(f,lw);float lh=dot(h,lw);\n  float mn_l=min(min(min(ld,le),min(lf,lb)),lh);\n  float mx_l=max(max(max(ld,le),max(lf,lb)),lh);\n  float amp=mn_l/(mx_l+0.01);\n  float wm=clamp((le-0.05)*2.2222,0.0,1.0);\n  float cg=clamp((mx_l-mn_l-0.005)*28.57,0.0,1.0);\n  float w=-(wm*cg)*(amp*0.2);\n  float rw=1.0/(4.0*w+1.0);\n  float detL=clamp(((lb+ld+lf+lh)*w+le)*rw,0.0,1.0)-le;\n  float satBoost=1.0+wm*0.18;\n  float sharpL=le+detL/(1.0+abs(detL)*4.0)*sharpenFactor*satBoost;\n  fragColor=vec4(clamp(vec3(sharpL)+(e-vec3(le))*satBoost,0.0,1.0),1.0);\n}';
+
+            const SHARPEN_FACTOR_NORMAL = '0.37';
+            const SHARPEN_FACTOR_HIGH = '1.0';
+            const fragSource = fragTemplate.replace(
+                '%SHARPEN_FACTOR%',
+                casMode === 'high' ? SHARPEN_FACTOR_HIGH : SHARPEN_FACTOR_NORMAL
+            );
+            const mkShader = (type, src) => {
+                const s = gl.createShader(type);
+                if (!s) return null;
+                gl.shaderSource(s, src);
+                gl.compileShader(s);
+                if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+                    gl.deleteShader(s);
+                    return null;
+                }
+                return s;
+            };
+
+            const prog = gl.createProgram();
+            if (!prog) { abortSetup(gl, null, null); return; }
+            const vs = mkShader(gl.VERTEX_SHADER, vert);
+            const fs = mkShader(gl.FRAGMENT_SHADER, fragSource);
+            if (!vs || !fs) {
+                abortSetup(gl, prog, [vs, fs]);
+                return;
             }
-        };
-        const armWatchdog = () => {
-            if (watchdog === null) watchdog = setTimeout(checkAlive, watchdogDelay);
-        };
+            gl.attachShader(prog, vs);
+            gl.attachShader(prog, fs);
+            gl.linkProgram(prog);
+            gl.detachShader(prog, vs); gl.deleteShader(vs);
+            gl.detachShader(prog, fs); gl.deleteShader(fs);
+            if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+                abortSetup(gl, prog, null);
+                return;
+            }
+            gl.useProgram(prog);
+            gl.disable(gl.BLEND);
+            gl.disable(gl.DITHER);
 
-        const scheduleFrame = () => {
-            if (frameHandle !== null) return;
-            // Arm rather than bail silently: this is the path taken when setup runs
-            // against an already-paused video, and when visibilitychange restores a
-            // stream that died while backgrounded.
-            if (video.paused || document.hidden) { armWatchdog(); return; }
-            stopWatchdog();
-            frameHandle = requestAnimationFrame(render);
-            if (hasRVFC && vfcHandle === null) vfcHandle = video.requestVideoFrameCallback(onVFC);
-        };
+            const vao = gl.createVertexArray();
+            if (!vao) { abortSetup(gl, prog, null); return; }
+            gl.bindVertexArray(vao);
 
-        const cancelFrame = () => {
-            if (frameHandle !== null) { cancelAnimationFrame(frameHandle); frameHandle = null; }
-            if (vfcHandle !== null) { video.cancelVideoFrameCallback(vfcHandle); vfcHandle = null; }
-            armWatchdog();
-        };
+            const buf = gl.createBuffer();
+            if (!buf) { abortSetup(gl, prog, null); return; }
+            gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+            gl.bufferData(gl.ARRAY_BUFFER, triVerts, gl.STATIC_DRAW);
+            const posLoc = gl.getAttribLocation(prog, 'position');
+            gl.enableVertexAttribArray(posLoc);
+            gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
 
-        // The rAF loop still spins every frame — it keeps the compositor and the
-        // CPU governor warm, which is why it is unconditional — but rVFC now drives
-        // the draw, so this is only the liveness ticker. It replaces the old
-        // parent-scoped removal MutationObserver, and remains the draw driver on
-        // the fallback path where rVFC is unavailable.
-        let liveCheck = 0;
-        const render = () => {
-            frameHandle = null;
-            if (++liveCheck >= 60) {
-                liveCheck = 0;
-                if (!video.srcObject || !document.contains(video)) {
+            const tex = gl.createTexture();
+            if (!tex) { abortSetup(gl, prog, null); return; }
+            gl.bindTexture(gl.TEXTURE_2D, tex);
+
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, EMPTY_PIXEL);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.uniform1i(gl.getUniformLocation(prog, 'data'), 0);
+            // Runs synchronously on 'resize'. It used to be debounced 16ms, which left a
+            // frame where present() scaled the new stream resolution into the old bridge
+            // size — xCloud changes resolution mid-stream on network conditions, so that
+            // was a visible hitch every switch. Nothing to debounce: the event only fires
+            // when the dimensions actually changed, and the equality check below already
+            // absorbs any burst.
+            let drawWidth = bridge.width;
+            let drawHeight = bridge.height;
+            const _syncSize = () => {
+                const w = video.videoWidth;
+                const h = video.videoHeight;
+                if (!w || !h) return;
+                if (canvas.width === w && canvas.height === h) return;
+                canvas.width = bridge.width = w;
+                canvas.height = bridge.height = h;
+                drawWidth = w;
+                drawHeight = h;
+                // Resizing the bridge resets its 2D context to defaults — reapply
+                bridgeCtx.imageSmoothingEnabled = false;
+                bridgeCtx.globalCompositeOperation = 'copy';
+                gl.viewport(0, 0, w, h);
+            };
+            _syncSize();
+
+
+            let frameHandle = null;
+            let vfcHandle = null;
+            const hasRVFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
+
+            const present = () => {
+                if (video.readyState < 2 || video.paused || document.hidden) return;
+                bridgeCtx.drawImage(video, 0, 0, drawWidth, drawHeight);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bridge);
+                gl.drawArrays(gl.TRIANGLES, 0, 3);
+            };
+
+            // Draw the moment the frame is decoded. This used to set a flag that the
+            // next rAF tick acted on, which cost up to a full vsync of latency before
+            // the frame was even copied, and put the GPU work on the vsync critical
+            // path. Draw count is unchanged — rVFC fires exactly once per decoded
+            // frame, which is what the old flag gated on.
+            const onVFC = () => {
+                vfcHandle = null;
+                present();
+                if (!video.paused && !document.hidden)
+                    vfcHandle = video.requestVideoFrameCallback(onVFC);
+            };
+
+            // Teardown detection has to survive a stopped loop. 'pause' and
+            // visibilitychange both cancel rAF, and the liveness check lives inside
+            // render() — so quitting a game or switching games left the last frame
+            // frozen under the opaque canvas with no path back to teardown. This only
+            // ticks while the loop is already stopped: zero cost while streaming.
+            let watchdog = null;
+            let watchdogDelay = 500;
+            const stopWatchdog = () => {
+                if (watchdog !== null) { clearTimeout(watchdog); watchdog = null; }
+                // Reset here, not in armWatchdog: stopWatchdog is the "loop is alive
+                // again" signal (scheduleFrame calls it on resume), so the next stall
+                // starts back at a fast 500ms first check.
+                watchdogDelay = 500;
+            };
+            const checkAlive = () => {
+                watchdog = null;
+                if (!video.srcObject || !document.contains(video) || video.ended) {
                     teardown(video);
                     return;
                 }
-            }
-            if (!hasRVFC) present();
+                // Paused-but-alive (srcObject intact, still in the DOM): nothing can
+                // change until an event fires, so don't keep polling at 2Hz forever —
+                // that was a permanent wakeup with nothing to do. Backs off
+                // 500 -> 1000 -> 2000 -> 4000 -> 5000ms. First check is still 500ms.
+                if (frameHandle === null) {
+                    watchdogDelay = Math.min(watchdogDelay * 2, 5000);
+                    watchdog = setTimeout(checkAlive, watchdogDelay);
+                }
+            };
+            const armWatchdog = () => {
+                if (watchdog === null) watchdog = setTimeout(checkAlive, watchdogDelay);
+            };
+
+            const scheduleFrame = () => {
+                if (frameHandle !== null) return;
+                // Arm rather than bail silently: this is the path taken when setup runs
+                // against an already-paused video, and when visibilitychange restores a
+                // stream that died while backgrounded.
+                if (video.paused || document.hidden) { armWatchdog(); return; }
+                stopWatchdog();
+                frameHandle = requestAnimationFrame(render);
+                if (hasRVFC && vfcHandle === null) vfcHandle = video.requestVideoFrameCallback(onVFC);
+            };
+
+            const cancelFrame = () => {
+                if (frameHandle !== null) { cancelAnimationFrame(frameHandle); frameHandle = null; }
+                if (vfcHandle !== null) { video.cancelVideoFrameCallback(vfcHandle); vfcHandle = null; }
+                armWatchdog();
+            };
+
+            // The rAF loop still spins every frame — it keeps the compositor and the
+            // CPU governor warm, which is why it is unconditional — but rVFC now drives
+            // the draw, so this is only the liveness ticker. It replaces the old
+            // parent-scoped removal MutationObserver, and remains the draw driver on
+            // the fallback path where rVFC is unavailable.
+            let liveCheck = 0;
+            const render = () => {
+                frameHandle = null;
+                if (++liveCheck >= 60) {
+                    liveCheck = 0;
+                    if (!video.srcObject || !document.contains(video)) {
+                        teardown(video);
+                        return;
+                    }
+                }
+                if (!hasRVFC) present();
+                scheduleFrame();
+            };
+
+            const onVisibility = () => { if (document.hidden) cancelFrame(); else scheduleFrame(); };
+
+            // stopWatchdog() must follow cancelFrame() — cancelFrame arms the watchdog,
+            // so the reverse order leaves a timer running against a torn-down pipeline.
+            const detach = () => {
+                cancelFrame();
+                stopWatchdog();
+                video.removeEventListener('pause', cancelFrame);
+                video.removeEventListener('play', scheduleFrame);
+                document.removeEventListener('visibilitychange', onVisibility);
+                video.removeEventListener('loadedmetadata', _syncSize);
+                video.removeEventListener('resize', _syncSize);
+                canvas.removeEventListener('webglcontextlost', onContextLost, false);
+                canvas.remove();
+                resetBridge();
+                video.style.visibility = '';
+                delete video.dataset.casSetup;
+                delete video._casCleanup;
+            };
+
+            const onContextLost = (e) => {
+                e.preventDefault();
+                detach();
+                watchWithoutCAS(video);
+            };
+            // detach() (via onContextLost) leaves this listener attached, so a restore can
+            // arrive after this stream ended or another one bound. Rebuilding then would
+            // stack a second opaque canvas and GL context over the live stream.
+            const onContextRestored = () => {
+                if (activeStreamVideo === video && video.srcObject && document.contains(video)) {
+                    setupWebGLCAS(video);
+                }
+            };
+            canvas.addEventListener('webglcontextlost', onContextLost, false);
+            canvas.addEventListener('webglcontextrestored', onContextRestored, false);
+
+            video._casCleanup = () => {
+                detach();
+                // Both context listeners must be gone before loseContext(): it queues a
+                // real 'webglcontextlost' task, and by the time that task runs xCloud may
+                // have re-used this same <video> for the next stream. The stale handler
+                // would then delete the new pipeline's casSetup/_casCleanup (leaking its
+                // GL context and canvas on the following switch) and unhide the video so
+                // it composites underneath the new opaque canvas every frame.
+                canvas.removeEventListener('webglcontextrestored', onContextRestored, false);
+                gl.getExtension('WEBGL_lose_context')?.loseContext();
+            };
+            video.addEventListener('loadedmetadata', _syncSize);
+            video.addEventListener('resize', _syncSize);
+            video.addEventListener('pause', cancelFrame);
+            video.addEventListener('play', scheduleFrame);
+            document.addEventListener('visibilitychange', onVisibility);
+            if (video._gxOffCleanup) video._gxOffCleanup();
             scheduleFrame();
-        };
-
-        const onVisibility = () => { if (document.hidden) cancelFrame(); else scheduleFrame(); };
-        video.addEventListener('pause', cancelFrame);
-        video.addEventListener('play', scheduleFrame);
-        document.addEventListener('visibilitychange', onVisibility);
-        scheduleFrame();
-
-        // stopWatchdog() must follow cancelFrame() — cancelFrame arms the watchdog,
-        // so the reverse order leaves a timer running against a torn-down pipeline.
-        const detach = () => {
-            cancelFrame();
-            stopWatchdog();
-            video.removeEventListener('pause', cancelFrame);
-            video.removeEventListener('play', scheduleFrame);
-            document.removeEventListener('visibilitychange', onVisibility);
-            video.removeEventListener('loadedmetadata', _syncSize);
-            video.removeEventListener('resize', _syncSize);
-            canvas.removeEventListener('webglcontextlost', onContextLost, false);
-            canvas.remove();
+        } catch (_) {
+            // Setup must never hide direct video or prevent the native play() call.
+            try { video._casCleanup?.(); } catch (_) {}
+            canvas?.remove();
+            resetBridge();
             video.style.visibility = '';
             delete video.dataset.casSetup;
             delete video._casCleanup;
-        };
-
-        const onContextLost = (e) => {
-            e.preventDefault();
-            detach();
-            watchWithoutCAS(video);
-        };
-        // detach() (via onContextLost) leaves this listener attached, so a restore can
-        // arrive after this stream ended or another one bound. Rebuilding then would
-        // stack a second opaque canvas and GL context over the live stream.
-        const onContextRestored = () => {
-            if (activeStreamVideo === video && video.srcObject && document.contains(video)) {
-                setupWebGLCAS(video);
-            }
-        };
-        canvas.addEventListener('webglcontextlost', onContextLost, false);
-        canvas.addEventListener('webglcontextrestored', onContextRestored, false);
-
-        video._casCleanup = () => {
-            detach();
-            // Both context listeners must be gone before loseContext(): it queues a
-            // real 'webglcontextlost' task, and by the time that task runs xCloud may
-            // have re-used this same <video> for the next stream. The stale handler
-            // would then delete the new pipeline's casSetup/_casCleanup (leaking its
-            // GL context and canvas on the following switch) and unhide the video so
-            // it composites underneath the new opaque canvas every frame.
-            canvas.removeEventListener('webglcontextrestored', onContextRestored, false);
-            bridge.width = 1; bridge.height = 1;
-            gl.getExtension('WEBGL_lose_context')?.loseContext();
-        };
-        if (video._gxOffCleanup) video._gxOffCleanup();
+            try { gl?.getExtension('WEBGL_lose_context')?.loseContext(); } catch (_) {}
+        }
     };
 
     window.__gxcloudSetCasMode = (mode) => {
@@ -454,9 +498,11 @@
     // configuration response. The ICE exchange doesn't necessarily list it, so —
     // like Better xCloud's XhomeInterceptor.handleConfiguration — it is added as a
     // candidate, here only while Prefer IPv6 is on.
-    let consoleIpv6 = null;
-    const ICE_URL = /\/sessions\/(cloud|home)\/[^/?#]+\/ice(?:[?#]|$)/;
-    const CONSOLE_CONFIG_URL = /\/sessions\/home\/[^/?#]+\/configuration(?:[?#]|$)/;
+    // Keep only the newest configuration, with its session and request identity.
+    // Late reads must not overwrite a newer console or configuration retry.
+    let consoleConfig = null;
+    const ICE_URL = /\/sessions\/(cloud|home)\/([^/?#]+)\/ice(?:[?#]|$)/;
+    const CONSOLE_CONFIG_URL = /\/sessions\/home\/([^/?#]+)\/configuration(?:[?#]|$)/;
     // Better xCloud also tries 9002 alongside the advertised port.
     const CONSOLE_DEFAULT_PORT = 9002;
     const MAX_ICE_PRIORITY = 2130706431;
@@ -466,7 +512,7 @@
         const details = config?.serverDetails;
         const address = typeof details?.ipV6Address === 'string' && details.ipV6Address.includes(':')
             ? details.ipV6Address : null;
-        consoleIpv6 = address
+        return address
             ? { address, ports: [...new Set([details.ipV6Port, CONSOLE_DEFAULT_PORT].filter(Number.isInteger))] }
             : null;
     };
@@ -479,49 +525,88 @@
         return { entry, parts, valid, ipv6: valid && parts[4].includes(':') };
     };
 
-    const rankIceCandidates = (candidates, consoleAddr) => {
-        const parsed = candidates.map(parseCandidate);
-        let added = [];
-        // Cloud sessions have no console candidates to synthesize or deduplicate.
-        if (consoleAddr?.ports.length) {
-            const known = new Set(parsed.filter(p => p.valid).map(p => p.parts[4].toLowerCase() + ' ' + p.parts[5]));
-            const ports = consoleAddr.ports.filter(port => !known.has(consoleAddr.address.toLowerCase() + ' ' + port));
-            if (ports.length) {
-                const template = parsed.find(p => p.valid)?.entry ?? { messageType: 'iceCandidate', sdpMLineIndex: '0', sdpMid: '0' };
-                added = ports.map((port, i) => parseCandidate({
-                    ...template,
-                    candidate: `a=candidate:${candidates.length + i + 1} 1 UDP 1 ${consoleAddr.address} ${port} typ host`
-                }));
-            }
+    // Off needs only the server count: no parsed records, partitions, or synthesis.
+    const IPV6_CANDIDATE = /^a=candidate:[^ ]* [^ ]* [^ ]* \d+ [^ ]*:[^ ]* /;
+    const countServerIpv6 = (candidates) => {
+        let count = 0;
+        for (const entry of candidates) {
+            if (typeof entry?.candidate === 'string' && IPV6_CANDIDATE.test(entry.candidate)) count++;
         }
-        serverIpv6Candidates = parsed.filter(p => p.ipv6).length + added.length;
-        if (!preferIpv6 || !serverIpv6Candidates) return null;
-        // New candidates go before a=end-of-candidates, which must stay last.
-        const end = parsed.findIndex(p => p.entry?.candidate === 'a=end-of-candidates');
-        parsed.splice(end < 0 ? parsed.length : end, 0, ...added);
-        const byPriority = (a, b) => Number(b.parts[3]) - Number(a.parts[3]);
-        parsed.filter(p => p.ipv6).sort(byPriority)
-            .forEach((p, i) => { p.parts[3] = String(MAX_ICE_PRIORITY - i); });
-        parsed.filter(p => p.valid && !p.ipv6).sort(byPriority)
-            .forEach((p, i) => { p.parts[3] = String(Math.max(1, IPV4_FALLBACK_PRIORITY - i)); });
-        return parsed.map(p => p.valid ? { ...p.entry, candidate: p.parts.join(' ') } : p.entry);
+        return count;
     };
 
-    // Overrides json()/text() on the original Response rather than building a new
-    // one, so status, headers and url stay exactly what xCloud's client expects.
-    const rewriteIceResponse = async (response, consoleAddr) => {
-        if (!response.ok) return response;
+    const rankIceCandidates = (candidates, consoleAddr) => {
+        const parsed = [];
+        const ipv6 = [];
+        const ipv4 = [];
+        const known = consoleAddr?.ports.length ? new Set() : null;
+        let template = null;
+        let end = -1;
+        // Partition once, preserving wire order separately from priority order.
+        for (const entry of candidates) {
+            const p = parseCandidate(entry);
+            if (end < 0 && entry?.candidate === 'a=end-of-candidates') end = parsed.length;
+            parsed.push(p);
+            if (!p.valid) continue;
+            (p.ipv6 ? ipv6 : ipv4).push(p);
+            if (!template) template = entry;
+            if (known) known.add(p.parts[4].toLowerCase() + ' ' + p.parts[5]);
+        }
+        const count = ipv6.length; // Only candidates actually supplied by the server.
+        const added = [];
+        if (known) {
+            const address = consoleAddr.address.toLowerCase();
+            for (const port of consoleAddr.ports) {
+                const key = address + ' ' + port;
+                if (known.has(key)) continue;
+                known.add(key);
+                const p = parseCandidate({
+                    ...(template ?? { messageType: 'iceCandidate', sdpMLineIndex: '0', sdpMid: '0' }),
+                    candidate: `a=candidate:${candidates.length + added.length + 1} 1 UDP 1 ${consoleAddr.address} ${port} typ host`
+                });
+                added.push(p);
+                ipv6.push(p);
+            }
+        }
+        if (!ipv6.length) return { count, ranked: null };
+        // New candidates go before a=end-of-candidates, which must stay last.
+        if (added.length) parsed.splice(end < 0 ? parsed.length : end, 0, ...added);
+        const byPriority = (a, b) => Number(b.parts[3]) - Number(a.parts[3]);
+        ipv6.sort(byPriority).forEach((p, i) => { p.parts[3] = String(MAX_ICE_PRIORITY - i); });
+        ipv4.sort(byPriority).forEach((p, i) => { p.parts[3] = String(Math.max(1, IPV4_FALLBACK_PRIORITY - i)); });
+        return { count, ranked: parsed.map(p => p.valid ? { ...p.entry, candidate: p.parts.join(' ') } : p.entry) };
+    };
+
+    const readIceResponse = async (response) => {
+        if (!response.ok) return null;
         const body = await response.clone().json();
-        if (typeof body?.exchangeResponse !== 'string') return response;
+        if (typeof body?.exchangeResponse !== 'string') return null;
         const candidates = JSON.parse(body.exchangeResponse);
-        if (!Array.isArray(candidates)) return response;
-        const ranked = rankIceCandidates(candidates, consoleAddr);
-        if (!ranked) return response;
-        body.exchangeResponse = JSON.stringify(ranked);
-        const text = JSON.stringify(body);
+        return Array.isArray(candidates) ? { body, candidates } : null;
+    };
+
+    // Preserve native response metadata and clone validation. Every clone receives
+    // the same json()/text() overrides, including clones of clones.
+    const overrideIceReaders = (response, text) => {
+        const nativeClone = response.clone.bind(response);
         response.json = () => Promise.resolve(JSON.parse(text));
         response.text = () => Promise.resolve(text);
+        response.clone = () => overrideIceReaders(nativeClone(), text);
         return response;
+    };
+
+    let latestIceRequest = null;
+    const processIceResponse = async (response, request, enabled) => {
+        const data = await readIceResponse(response);
+        if (!data) return response;
+        const { count, ranked } = enabled
+            ? rankIceCandidates(data.candidates, request.config?.address)
+            : { count: countServerIpv6(data.candidates), ranked: null };
+        // An asynchronous Off observation must not overwrite a newer connection.
+        if (latestIceRequest === request) serverIpv6Candidates = count;
+        if (!ranked) return response;
+        data.body.exchangeResponse = JSON.stringify(ranked);
+        return overrideIceReaders(response, JSON.stringify(data.body));
     };
 
     const nativeFetch = window.fetch;
@@ -529,21 +614,34 @@
         window.fetch = function(input, init) {
             const result = nativeFetch.apply(this, arguments);
             const url = typeof input === 'string' ? input : input?.url ?? String(input);
-            const isConsoleConfig = CONSOLE_CONFIG_URL.test(url);
-            const ice = isConsoleConfig ? null : ICE_URL.exec(url);
-            if (!isConsoleConfig && !ice) return result;
+            const config = CONSOLE_CONFIG_URL.exec(url);
+            const ice = config ? null : ICE_URL.exec(url);
+            if (!config && !ice) return result;
             const method = String(init?.method ?? input?.method ?? 'GET').toUpperCase();
             if (method !== 'GET') return result;
-            if (isConsoleConfig) {
+            if (config) {
+                const request = { sessionId: config[1], address: null };
+                consoleConfig = request;
                 // Observe only. Cloned before this returns, so it never races xCloud's read.
                 result.then(response => response.ok ? response.clone().json() : null)
-                    .then(readConsoleAddress, () => { consoleIpv6 = null; });
+                    .then(body => {
+                        if (consoleConfig === request) request.address = readConsoleAddress(body);
+                    }, () => {}); // Failed reads leave this request's address empty.
                 return result;
             }
-            // Any parse failure (204 while the server is still gathering, a schema
-            // change) hands xCloud the untouched response.
+            const request = { config: ice[1] === 'home' && consoleConfig?.sessionId === ice[2]
+                ? consoleConfig : null };
+            latestIceRequest = request;
+            if (!preferIpv6) {
+                // Clone before the client's read, but never hold up response delivery.
+                // Capture Off for this request even if the user toggles while parsing.
+                result.then(response => processIceResponse(response, request, false)).catch(() => {});
+                return result;
+            }
+            // Any parse failure (204 while gathering, a schema change) hands the
+            // client the untouched response. Enabled requests rewrite before delivery.
             return result.then(response =>
-                rewriteIceResponse(response, ice[1] === 'home' ? consoleIpv6 : null).catch(() => response));
+                processIceResponse(response, request, true).catch(() => response));
         };
     }
 
@@ -648,12 +746,10 @@
         if (!video) return { state: 'No active stream', casMode, serverIpv6Candidates, connectionPath };
         const quality = video.getVideoPlaybackQuality?.();
         const total = quality?.totalVideoFrames ?? video.webkitDecodedFrameCount ?? '--';
-        const dropped = quality?.droppedVideoFrames ?? video.webkitDroppedFrameCount ?? '--';
         return {
             state: video.ended ? 'Ended' : video.paused ? 'Paused' : video.readyState >= 2 ? 'Playing' : 'Loading',
             resolution: video.videoWidth && video.videoHeight ? video.videoWidth + '×' + video.videoHeight : '--',
             totalFrames: String(total),
-            droppedFrames: String(dropped),
             casMode,
             serverIpv6Candidates,
             connectionPath

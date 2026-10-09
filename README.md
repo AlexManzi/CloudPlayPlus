@@ -1,17 +1,19 @@
 # **CloudPlayPlus**
 
-A lightweight, fast, and minimal Android launcher for **Xbox Cloud Gaming**.  
+A lightweight Android launcher for **Xbox Cloud Gaming and Remote Play**.
 CloudPlayPlus focuses on simplicity, performance, and a clean experience—ideal for handhelds like the **Logitech G Cloud**, Android tablets, and phones.
 
 ---
 
 ## 🚀 Features
 
-- **Instant Launch** — Opens Xbox Cloud Gaming quickly without extra UI clutter.
-- **AMD FidelityFX CAS** — CloudPlayPlus applies AMD's Contrast Adaptive Sharpening (CAS) algorithm via a WebGL2 fragment shader to make Xbox Cloud Gaming streams clearer. CAS reduces the soft, blurred look of video-based streaming and improves text and UI crispness without adding latency. The shader uses luma-weighted sharpening (suppressing sharpening in dark areas to avoid noise amplification) and hooks into `requestVideoFrameCallback` for frame-accurate rendering. Runs with a `low-power` WebGL context to preserve battery life.
-- **Discord Overlay** — A toggle in the Xbox guide enables Discord mode. When active, 4 rapid taps opens a Discord window over the stream (works on the dashboard and mid-stream); 4 more taps closes it. Taps inside the Discord window itself don't count, so you can use it normally. When the toggle is off, 4 taps does nothing and Discord adds zero overhead — the WebView is never even created.
-- **Notes** — A built-in notepad opened from the Xbox guide, for keeping track of puzzle codes, quest steps, or anything else mid-game. Notes save automatically and persist locally on the device.
-- **Lightweight** — Built with Kotlin and minimal dependencies, <800kb app size>.  
+- **Quick Menu** — A four-finger tap opens native controls for sharpening, Notes, Discord, and Stream Settings.
+- **Launch Destination** — Choose Cloud Gaming or Remote Play for the next fresh app launch. The preference is saved; changing it leaves the current session in place.
+- **AMD CAS** — Choose Off, Normal, or High sharpening from the Quick Menu. The WebGL2 shader adapts to image contrast and suppresses sharpening in dark areas. If sharpening setup fails, playback falls back to direct video.
+- **Stream Settings** — Prefer IPv6 when the next stream connects, with IPv4 retained as a fallback. Open Stream Stats for resolution, frame count, connection path, and device readings.
+- **Discord Overlay** — Enable Discord from the Quick Menu, then use four rapid taps to show or hide its panel. Taps inside the panel don't count toward the gesture. Hiding keeps the loaded session; turning Discord off destroys its WebView. Enabling alone creates no WebView until the panel is opened.
+- **Notes** — Open the local notepad from the Quick Menu for puzzle codes, quest steps, or anything else mid-game. Notes save automatically and persist locally on the device.
+- **Lightweight** — Built with Kotlin and minimal dependencies.
 - **Android‑Native** — Uses modern Android tooling (Gradle Kotlin DSL, AndroidX).  
 - **Open Source** — Simple codebase designed for learning, modding, and extending.
 

@@ -146,25 +146,24 @@ class NotesController(
                 .setNegativeButton("Cancel", null)
                 .show()
         }
-        val autoSave = {
+        val updateField = { value: Editable?, assign: (Note, String) -> Unit ->
             val id = selectedNoteId
             if (id != null && !loadingEditor) {
                 notes.find { it.id == id }?.let {
-                    it.title = title.text.toString()
-                    it.body = body.text.toString()
+                    assign(it, value?.toString() ?: "")
                     it.updatedAt = System.currentTimeMillis()
                     markDirty()
                 }
                 scheduleSave()
             }
         }
-        title.addTextChangedListener(watcher(autoSave))
-        body.addTextChangedListener(watcher(autoSave))
+        title.addTextChangedListener(watcher { value -> updateField(value) { note, text -> note.title = text } })
+        body.addTextChangedListener(watcher { value -> updateField(value) { note, text -> note.body = text } })
         return root
     }
 
-    private fun watcher(after: () -> Unit) = object : TextWatcher {
-        override fun afterTextChanged(s: Editable?) = after()
+    private fun watcher(after: (Editable?) -> Unit) = object : TextWatcher {
+        override fun afterTextChanged(s: Editable?) = after(s)
         override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
         override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
     }
