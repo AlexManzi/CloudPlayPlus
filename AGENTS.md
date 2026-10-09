@@ -5,6 +5,21 @@ was tried and rejected. Read this before suggesting changes.
 
 ---
 
+## Stream startup diagnostic rollback — 2026-10-08
+
+- After audio-without-video was reported on 1.2.0, the user requested restoring
+  ICE response handling and CAS setup to the 1.1.3 source (`7082dbb`). The cause
+  has not been confirmed on the device; this is a diagnostic rollback.
+- Shared bridge allocation, CAS setup/cleanup/context-loss behavior, console
+  configuration storage, candidate ranking/counts, and response readers/fetch
+  delivery now match 1.1.3. This supersedes the newer CAS/ICE implementation notes
+  below, including lazy allocation, setup exception handling, session isolation,
+  asynchronous Off counts, server-only counts, and recursive clone rewrites.
+- Native Stream Settings, saved launch preference, Notes/input improvements,
+  five-second device metric cache, and Discord lifetime changes remain. The unused
+  dropped-frame payload remains omitted. JS tests use the matching 1.1.3 suite
+  plus the retained stats-payload regression.
+
 ## Discord hidden-session lifetime — 2026-10-08
 
 - Disabling Discord destroys and detaches its WebView even when the panel is already
