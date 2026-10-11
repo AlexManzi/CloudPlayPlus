@@ -5,20 +5,35 @@ was tried and rejected. Read this before suggesting changes.
 
 ---
 
-## Stream startup diagnostic rollback — 2026-10-08
+## Release 1.2.2 — 2026-10-11
 
-- After audio-without-video was reported on 1.2.0, the user requested restoring
-  ICE response handling and CAS setup to the 1.1.3 source (`7082dbb`). The cause
-  has not been confirmed on the device; this is a diagnostic rollback.
-- Shared bridge allocation, CAS setup/cleanup/context-loss behavior, console
-  configuration storage, candidate ranking/counts, and response readers/fetch
-  delivery now match 1.1.3. This supersedes the newer CAS/ICE implementation notes
-  below, including lazy allocation, setup exception handling, session isolation,
-  asynchronous Off counts, server-only counts, and recursive clone rewrites.
-- Native Stream Settings, saved launch preference, Notes/input improvements,
-  five-second device metric cache, and Discord lifetime changes remain. The unused
-  dropped-frame payload remains omitted. JS tests use the matching 1.1.3 suite
-  plus the retained stats-payload regression.
+- Release metadata is versionName 1.2.2/versionCode 4. The published 1.2.1 APK
+  was inspected and uses versionCode 3.
+- Restores the 1.2.0 ICE/CAS implementation after the Xbox restart resolved the
+  reported freeze, and includes the CAS initial-sizing fix described below.
+- Validation: 62 JS tests and 10 JVM tests pass; debug/release lint has no errors
+  and 73 existing warnings in each variant. Exported APKs/profiles and unrelated
+  worktrees are excluded. On-device playback, CAS switches/exit, and Discord voice
+  continuity still need smoke testing; no APK is built by the release workflow.
+
+## CAS initial sizing guard — 2026-10-11
+
+- Size synchronization checks both output and bridge dimensions and starts with
+  unset draw dimensions so every new GL pipeline establishes its viewport. A
+  300×150 stream must not skip initialization just because the output canvas has
+  those default dimensions. Unchanged resize/metadata events still return early.
+- JS regression tests cover 300×150 and 1×1 setup, context-loss restoration,
+  native-sized draws, drawing-state preservation, and redundant-event suppression.
+  The measured upload, shader, and rendering cadence are unchanged.
+
+## Restore 1.2.0 after Xbox restart — 2026-10-11
+
+- The user reported that restarting the Xbox resolved the Remote Play freeze and
+  requested restoring the complete 1.2.0 source (`25625eb`). The diagnostic rollbacks
+  and selective reintroduction are superseded; they did not establish an app cause.
+- App source, tests, and build configuration match 1.2.0, including versionName
+  1.2.0/versionCode 2 and its ICE/CAS, Discord, Notes, stats, and launch changes.
+  Exported APKs, profiles, and unrelated worktrees are untouched.
 
 ## Discord hidden-session lifetime — 2026-10-08
 
