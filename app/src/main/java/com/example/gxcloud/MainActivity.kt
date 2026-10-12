@@ -10,6 +10,7 @@ import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -55,6 +56,20 @@ class MainActivity : AppCompatActivity() {
     private lateinit var quickMenuController: QuickMenuController
     private lateinit var audioManager: AudioManager
     private lateinit var audioFocusRequest: AudioFocusRequest
+    private val batteryManager by lazy { getSystemService(BATTERY_SERVICE) as BatteryManager }
+    private val batteryFilter by lazy { IntentFilter(Intent.ACTION_BATTERY_CHANGED) }
+    // Header and wattage share level/voltage without polling while the menu is hidden.
+    private val batterySnapshot = ExpiringValue<BatterySnapshot?>(5_000L, { SystemClock.elapsedRealtime() }) {
+        try {
+            registerReceiver(null, batteryFilter)?.let { intent ->
+                BatterySnapshot.from(
+                    intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1),
+                    intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1),
+                    intent.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1)
+                )
+            }
+        } catch (_: Exception) { null }
+    }
 
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -125,13 +140,13 @@ class MainActivity : AppCompatActivity() {
                 val generation = documentGeneration
                 if (view == null) {
                     val stats = JSONObject().put("state", "Stream unavailable").put("casMode", casMode)
-                    callback(JSONObject.quote(stats.toString()))
+                    callback(stats.toString())
                 } else {
                     val request = statsRequests.begin()
                     if (request != null) {
                         try {
                             view.evaluateJavascript(
-                                "JSON.stringify(window.__gxcloudGetStreamStats ? window.__gxcloudGetStreamStats() : null)"
+                                "window.__gxcloudGetStreamStats ? window.__gxcloudGetStreamStats() : null"
                             ) { raw ->
                                 if (statsRequests.complete(request)) {
                                     if (view === webView && generation == documentGeneration) callback(raw)
@@ -148,10 +163,7 @@ class MainActivity : AppCompatActivity() {
                 webView?.evaluateJavascript("window.__gxcloudSetCasMode&&window.__gxcloudSetCasMode('$casMode')", null)
             },
             getCasMode = { casMode },
-            batteryPercent = {
-                val bm = getSystemService(BATTERY_SERVICE) as BatteryManager
-                bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
-            },
+            batteryPercent = { batterySnapshot.get()?.percentage ?: -1 },
             ramStatus = { readRamStatus() },
             thermalStatus = { readThermalStatus() },
             wattage = { readWattage() },
@@ -502,12 +514,9 @@ class MainActivity : AppCompatActivity() {
     // those are blocked. Returns null if either reading is missing/unsupported on this device.
     private fun readWattage(): Double? {
         return try {
-            val bm = getSystemService(BATTERY_SERVICE) as BatteryManager
-            val microAmps = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
+            val microAmps = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
             if (microAmps == Int.MIN_VALUE || microAmps == 0) return null
-            val batteryStatus = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-            val milliVolts = batteryStatus?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1) ?: -1
-            if (milliVolts <= 0) return null
+            val milliVolts = batterySnapshot.get()?.milliVolts ?: return null
             (abs(microAmps) / 1_000_000.0) * (milliVolts / 1000.0)
         } catch (_: Exception) {
             null

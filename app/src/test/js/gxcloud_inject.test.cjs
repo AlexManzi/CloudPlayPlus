@@ -19,6 +19,7 @@ function browser(mode = 'off', { attached = true, webgl = true, glOverrides = {}
     const created = [];
     let canvas2dRequests = 0;
     let id = 0;
+    let now = 0;
     let lostContexts = 0;
     let documentQueries = 0;
     function mutation(target, addedNodes = [], removedNodes = []) {
@@ -170,6 +171,7 @@ function browser(mode = 'off', { attached = true, webgl = true, glOverrides = {}
     const window = { __gxcloudInitialCasMode: mode, __gxcloudInitialPreferIpv6: preferIpv6, fetch, RTCPeerConnection };
     runInNewContext(source, {
         window, document, HTMLMediaElement: Video, HTMLVideoElement: Video,
+        performance: { now: () => now },
         MutationObserver: Observer,
         requestAnimationFrame: callback => {
             if (rafThrows) throw new Error('Scheduling failed');
@@ -188,6 +190,7 @@ function browser(mode = 'off', { attached = true, webgl = true, glOverrides = {}
     }
     return {
         window, document, video, streamContainer, Element, observers, timers, raf, vfc, draws, drawSizes, flush, created,
+        advanceTime(milliseconds) { now += milliseconds; },
         get canvas2dRequests() { return canvas2dRequests; },
         get lostContexts() { return lostContexts; },
         get documentQueries() { return documentQueries; },
@@ -896,6 +899,8 @@ test('stats report the selected pair as IPv4/IPv6 and direct/relay, one poll beh
     assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv6 (direct)');
     report[2].candidateType = 'relay';
     report[3].address = '20.1.2.3';
+    b.advanceTime(5000);
+    b.window.__gxcloudGetStreamStats();
     await settle();
     assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv4 (relay)');
 });
@@ -920,18 +925,110 @@ test('selected video ICE pair is current on the first poll and never collects fu
     assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv6 (direct)');
     pair.local.type = 'relay';
     pair.remote.address = '20.1.2.3';
+    for (let i = 0; i < 4; i++) {
+        b.advanceTime(1000);
+        assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv6 (direct)');
+        assert.equal(reads, 1);
+    }
+    b.advanceTime(1000);
     assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv4 (relay)');
+    assert.equal(reads, 2);
     pair.local.type = 'host';
     pair.remote.type = 'relay';
+    b.advanceTime(5000);
     assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv4 (relay)');
     pair = null;
+    b.advanceTime(5000);
     assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, null);
     pair = { local: { type: 'host' }, remote: { type: 'host', address: null } };
+    b.advanceTime(5000);
     assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, null);
     const beforeClose = reads;
     pc.connectionState = 'closed';
     assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, null);
     assert.equal(reads, beforeClose);
+});
+
+test('state events invalidate cached paths without background reads and detach old listeners', () => {
+    let reads = 0;
+    let address = '2603:1030::5';
+    class PeerConnection extends EventTarget {
+        constructor() { super(); this.connectionState = 'connected'; this.iceConnectionState = 'connected'; this.listeners = new Set(); }
+        addEventListener(type, listener) { this.listeners.add(type); super.addEventListener(type, listener); }
+        removeEventListener(type, listener) { this.listeners.delete(type); super.removeEventListener(type, listener); }
+        getReceivers() { return [{ track: { kind: 'video' }, transport: { iceTransport: {
+            getSelectedCandidatePair() { reads++; return { remote: { address, type: 'host' } }; }
+        } } }]; }
+    }
+    const b = browser('off', { RTCPeerConnection: PeerConnection });
+    const old = new b.window.RTCPeerConnection();
+    assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv6 (direct)');
+    address = '20.1.2.3';
+    old.dispatchEvent(new Event('iceconnectionstatechange'));
+    assert.equal(reads, 1);
+    assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv4 (direct)');
+    const current = new b.window.RTCPeerConnection();
+    assert.equal(old.listeners.size, 0);
+    address = '2603:1030::5';
+    assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv6 (direct)');
+    old.dispatchEvent(new Event('connectionstatechange'));
+    b.window.__gxcloudGetStreamStats();
+    assert.equal(reads, 3);
+    current.connectionState = 'closed';
+    current.dispatchEvent(new Event('connectionstatechange'));
+    assert.equal(current.listeners.size, 0);
+    assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, null);
+    assert.equal(reads, 3);
+});
+
+test('playback fields stay current between connection-path checks and expiry is demand driven', () => {
+    let reads = 0;
+    class PeerConnection {
+        getReceivers() { return [{ track: { kind: 'video' }, transport: { iceTransport: {
+            getSelectedCandidatePair() { reads++; return { remote: { address: '20.1.2.3', type: 'host' } }; }
+        } } }]; }
+    }
+    const b = browser('off', { RTCPeerConnection: PeerConnection });
+    new b.window.RTCPeerConnection();
+    b.window.__gxcloudGetStreamStats();
+    b.advanceTime(1000);
+    b.video.paused = true;
+    b.video.videoWidth = 1280;
+    b.video.videoHeight = 720;
+    b.video.getVideoPlaybackQuality = () => ({ totalVideoFrames: 42 });
+    const stats = b.window.__gxcloudGetStreamStats();
+    assert.equal(stats.state, 'Paused');
+    assert.equal(stats.resolution, '1280×720');
+    assert.equal(stats.totalFrames, '42');
+    assert.equal(reads, 1);
+    b.advanceTime(60000);
+    assert.equal(reads, 1);
+    b.window.__gxcloudGetStreamStats();
+    assert.equal(reads, 2);
+});
+
+test('state invalidation rejects pending old reports and permits a fresh request immediately', async () => {
+    const completions = [];
+    class PeerConnection extends EventTarget {
+        constructor() { super(); this.connectionState = 'connected'; this.iceConnectionState = 'connected'; }
+        getStats() { return new Promise(resolve => completions.push(resolve)); }
+    }
+    const b = browser('off', { RTCPeerConnection: PeerConnection });
+    const pc = new b.window.RTCPeerConnection();
+    b.window.__gxcloudGetStreamStats();
+    await settle();
+    pc.iceConnectionState = 'checking';
+    pc.dispatchEvent(new Event('iceconnectionstatechange'));
+    b.window.__gxcloudGetStreamStats();
+    await settle();
+    assert.equal(completions.length, 2);
+    completions[0](pathReport('2603:1030::5'));
+    await settle();
+    assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, null);
+    completions[1](pathReport('20.1.2.3'));
+    await settle();
+    assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv4 (direct)');
+    assert.equal(completions.length, 2);
 });
 
 test('selected pair can be read through senders or SCTP when no video transport exists', () => {
@@ -974,7 +1071,11 @@ test('unavailable or throwing selected-pair API falls back without overlapping r
         resolveStats(pathReport('2603:1030::5'));
         await settle();
         assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv6 (direct)');
+        assert.equal(calls, 1);
+        b.advanceTime(5000);
+        b.window.__gxcloudGetStreamStats();
         await settle();
+        assert.equal(calls, 2);
         resolveStats(new Map());
         await settle();
     }
@@ -1016,6 +1117,7 @@ test('closed peers and synchronous or asynchronous stats failures are contained'
         const b = browser('off', { RTCPeerConnection: PeerConnection });
         new b.window.RTCPeerConnection();
         for (let i = 0; i < 2; i++) {
+            b.advanceTime(5000);
             assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, null);
             await settle();
         }
@@ -1037,6 +1139,7 @@ test('late full stats cannot overwrite a newly available selected-pair result', 
     transport = { iceTransport: { getSelectedCandidatePair: () => ({
         local: { type: 'host' }, remote: { type: 'host', address: '20.1.2.3' }
     }) } };
+    b.advanceTime(5000);
     assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, 'IPv4 (direct)');
     resolveStats(pathReport('2603:1030::5'));
     await settle();

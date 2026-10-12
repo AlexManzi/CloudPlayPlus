@@ -653,18 +653,42 @@
     // Which path the live stream actually took. Only the newest peer connection is
     // kept — xCloud makes one per stream. Read the selected ICE pair synchronously
     // when available; only the compatibility getStats() path is one poll behind.
-    // Nothing runs unless the stats page asks.
+    // Check at most every five seconds while stats asks; state changes invalidate
+    // the cache without collecting reports or adding background timers.
+    const CONNECTION_PATH_INTERVAL_MS = 5000;
     let streamPeerConnection = null;
     let connectionPath = null;
     let connectionPathPending = null;
+    let connectionPathCheckedAt = null;
+    let connectionPathState = null;
+    let connectionPathIceState = null;
+    let connectionPathCleanup = null;
     const NativePeerConnection = window.RTCPeerConnection;
     if (typeof NativePeerConnection === 'function') {
         window.RTCPeerConnection = class RTCPeerConnection extends NativePeerConnection {
             constructor(...args) {
                 super(...args);
+                connectionPathCleanup?.();
                 streamPeerConnection = this;
                 connectionPath = null;
                 connectionPathPending = null;
+                connectionPathCheckedAt = null;
+                connectionPathState = this.connectionState;
+                connectionPathIceState = this.iceConnectionState;
+                const invalidate = () => {
+                    if (streamPeerConnection !== this) return;
+                    connectionPath = null;
+                    connectionPathPending = null;
+                    connectionPathCheckedAt = null;
+                    if (this.connectionState === 'closed') connectionPathCleanup?.();
+                };
+                this.addEventListener?.('connectionstatechange', invalidate);
+                this.addEventListener?.('iceconnectionstatechange', invalidate);
+                connectionPathCleanup = () => {
+                    this.removeEventListener?.('connectionstatechange', invalidate);
+                    this.removeEventListener?.('iceconnectionstatechange', invalidate);
+                    connectionPathCleanup = null;
+                };
             }
         };
     }
@@ -718,11 +742,22 @@
     const refreshConnectionPath = () => {
         const pc = streamPeerConnection;
         if (!pc) return;
+        if (connectionPathState !== pc.connectionState || connectionPathIceState !== pc.iceConnectionState) {
+            connectionPathState = pc.connectionState;
+            connectionPathIceState = pc.iceConnectionState;
+            connectionPath = null;
+            connectionPathPending = null;
+            connectionPathCheckedAt = null;
+        }
         if (pc.connectionState === 'closed') {
             connectionPath = null;
             connectionPathPending = null;
+            connectionPathCleanup?.();
             return;
         }
+        const now = performance.now();
+        if (connectionPathCheckedAt !== null && now - connectionPathCheckedAt < CONNECTION_PATH_INTERVAL_MS) return;
+        connectionPathCheckedAt = now;
         try {
             const path = readSelectedPath(pc);
             if (path !== undefined) {

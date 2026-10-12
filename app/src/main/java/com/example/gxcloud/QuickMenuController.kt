@@ -9,7 +9,7 @@ import android.view.ViewStub
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.TextView
-import org.json.JSONTokener
+import org.json.JSONObject
 import java.text.DateFormat
 import java.util.Date
 import kotlin.math.roundToInt
@@ -47,6 +47,12 @@ class QuickMenuController(
     private val casButtons = mutableMapOf<String, Button>()
     private val handler = Handler(Looper.getMainLooper())
     private val timeFormat = DateFormat.getTimeInstance(DateFormat.SHORT)
+    private val headerDate = Date(0)
+    private val headerText = ExpiringValue(HEADER_INTERVAL_MS, { SystemClock.elapsedRealtime() }) {
+        val battery = batteryPercent().takeIf { it in 0..100 }?.let { "$it%" } ?: "--%"
+        headerDate.time = System.currentTimeMillis()
+        "$battery   |   ${timeFormat.format(headerDate)}"
+    }
     private data class DeviceStats(val ram: String, val thermal: String, val watts: String)
     private val deviceStats = ExpiringValue(HEADER_INTERVAL_MS, { SystemClock.elapsedRealtime() }) {
         DeviceStats(
@@ -257,19 +263,19 @@ class QuickMenuController(
 
     private fun refreshStats() {
         if (!isVisible) return
-        updateDiscordLabel()
-        val battery = batteryPercent().takeIf { it in 0..100 }?.let { "$it%" } ?: "--%"
-        val time = timeFormat.format(Date())
-        val header = "$battery   |   $time"
+        val header = headerText.get()
         if (headerStatus?.text != header) headerStatus?.text = header
         // The full stats page is the only consumer of requestStats — skip the renderer
         // IPC (evaluateJavascript) entirely while it isn't visible.
         if (statsPage?.visibility != View.VISIBLE) return
         requestStats { raw ->
             if (!isVisible || statsPage?.visibility != View.VISIBLE) return@requestStats
+            if (raw == "null") {
+                showUnavailableStats()
+                return@requestStats
+            }
             try {
-                val value = JSONTokener(raw).nextValue() as? String ?: return@requestStats
-                val stats = org.json.JSONObject(value)
+                val stats = JSONObject(raw)
                 // Native selection is authoritative; an older document cannot reset it.
                 val casMode = getCasMode()
                 val resolution = stats.optString("resolution", "--")
@@ -300,10 +306,14 @@ class QuickMenuController(
                     "Connection      $connection"
                 if (fullStatsText?.text != text) fullStatsText?.text = text
             } catch (_: Exception) {
-                val fallback = "No active stream statistics available."
-                if (fullStatsText?.text != fallback) fullStatsText?.text = fallback
+                showUnavailableStats()
             }
         }
+    }
+
+    private fun showUnavailableStats() {
+        val fallback = "No active stream statistics available."
+        if (fullStatsText?.text != fallback) fullStatsText?.text = fallback
     }
 
     private companion object {

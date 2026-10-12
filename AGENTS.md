@@ -5,6 +5,57 @@ was tried and rejected. Read this before suggesting changes.
 
 ---
 
+## Release 1.2.3 — 2026-10-11
+
+- Metadata is versionName 1.2.3/versionCode 5, above the prepared 1.2.2 code 4
+  and the inspected published 1.2.1 APK code 3. GitHub's latest published release
+  remains v1.2.1; the prepared 1.2.2 commit has no release/tag at review time.
+- Includes the restored ICE/CAS handling and initial-sizing fix, connection-label
+  throttling, shared battery snapshot, header formatting cache, and direct object
+  Stats IPC. No measured speed or battery improvement is claimed.
+- Checks pass: 65 JS tests, 12 JVM tests, debug/release lint with no errors and
+  73 existing warnings each. Device confirmation of Stats fields, refresh timing,
+  connection changes, and playback remains outstanding. Exported artifacts and
+  unrelated worktrees are excluded; APK building/publication remains with the user.
+
+## Stream Stats JSON result — 2026-10-11
+
+- Stats evaluation returns the plain object; WebView performs the JSON encoding.
+  Kotlin parses that result once with JSONObject, and the native unavailable-view
+  response uses the same object JSON format. No double-encoded string remains.
+- A null evaluation result displays the existing unavailable-stats message instead
+  of leaving a stale reading visible. Request/lifecycle guards remain unchanged.
+
+## Quick Menu header refresh — 2026-10-11
+
+- Battery/clock header formatting has its own five-second demand-driven cache,
+  separate from one-second playback stats. Formatting reuses one main-thread Date.
+  Reopening after cache expiry updates immediately; no additional timer is added.
+- Discord labels update on menu open and toggle clicks, rather than every refresh
+  tick. Those cover all current enablement changes. Existing text comparison guards
+  and stream-stat visibility/lifecycle gates remain.
+
+## Shared battery snapshot — 2026-10-11
+
+- Header percentage and Stats wattage share a five-second, demand-driven sticky
+  battery snapshot. Percentage uses level/scale; voltage comes from the same intent.
+  Missing/invalid fields remain independently unavailable and failed reads are cached.
+- Instantaneous current is still queried only by visible Stats through its existing
+  five-second device cache. Opening other menu pages does not sample current. No
+  receiver or background timer is registered; the intent filter and BatteryManager
+  are reused. JVM tests cover scale conversion, invalid fields, and overflow.
+
+## Connection label refresh throttle — 2026-10-11
+
+- Visible Stats requests still update playback fields every second. Selected-pair
+  lookups and compatibility reports run at most every five seconds, using a
+  monotonic clock and demand-driven expiry without background timers.
+- New peers reset the cache. ICE/connection state events invalidate cached labels
+  and pending requests; the next Stats request refreshes immediately. Listeners
+  are removed on peer replacement/closure, and stale reports remain ignored.
+- Pair changes without a state event may take up to five seconds to appear while
+  Stats is visible. No connection negotiation or rendering behavior is changed.
+
 ## Release 1.2.2 — 2026-10-11
 
 - Release metadata is versionName 1.2.2/versionCode 4. The published 1.2.1 APK
