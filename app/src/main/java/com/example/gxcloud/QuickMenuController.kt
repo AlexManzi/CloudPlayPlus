@@ -12,6 +12,7 @@ import android.widget.TextView
 import org.json.JSONObject
 import java.text.DateFormat
 import java.util.Date
+import java.lang.ref.WeakReference
 import kotlin.math.roundToInt
 
 class QuickMenuController(
@@ -45,7 +46,9 @@ class QuickMenuController(
     private var statsPage: View? = null
     private var mainPage: View? = null
     private val casButtons = mutableMapOf<String, Button>()
+    private val styledCasButtons = mutableMapOf<String, Boolean>()
     private val handler = Handler(Looper.getMainLooper())
+    private val callbackOwner = WeakReference(this)
     private val timeFormat = DateFormat.getTimeInstance(DateFormat.SHORT)
     private val headerDate = Date(0)
     private val headerText = ExpiringValue(HEADER_INTERVAL_MS, { SystemClock.elapsedRealtime() }) {
@@ -200,6 +203,9 @@ class QuickMenuController(
         val casMode = getCasMode()
         casButtons.forEach { (mode, button) ->
             val selected = mode == casMode
+            // An absent entry still styles the button on its first initialization.
+            if (styledCasButtons[mode] == selected) return@forEach
+            styledCasButtons[mode] = selected
             button.isSelected = selected
             button.setTextColor(if (selected) Color.WHITE else Color.rgb(210, 210, 210))
             button.setBackgroundResource(
@@ -268,46 +274,55 @@ class QuickMenuController(
         // The full stats page is the only consumer of requestStats — skip the renderer
         // IPC (evaluateJavascript) entirely while it isn't visible.
         if (statsPage?.visibility != View.VISIBLE) return
+        val owner = callbackOwner
         requestStats { raw ->
-            if (!isVisible || statsPage?.visibility != View.VISIBLE) return@requestStats
-            if (raw == "null") {
-                showUnavailableStats()
-                return@requestStats
+            owner.get()?.applyStatsResult(raw)
+        }
+    }
+
+    private fun applyStatsResult(raw: String) {
+        if (!isVisible || statsPage?.visibility != View.VISIBLE) return
+        if (raw == "null") {
+            showUnavailableStats()
+            return
+        }
+        try {
+            val stats = JSONObject(raw)
+            // Native selection is authoritative; an older document cannot reset it.
+            val casLabel = when (getCasMode()) {
+                "off" -> "Off"
+                "high" -> "High"
+                else -> "Normal"
             }
-            try {
-                val stats = JSONObject(raw)
-                // Native selection is authoritative; an older document cannot reset it.
-                val casMode = getCasMode()
-                val resolution = stats.optString("resolution", "--")
-                val total = stats.optString("totalFrames", "--")
-                val state = stats.optString("state", "No active stream")
-                // System CPU% and GPU clock/busy% are not shown: confirmed on this device
-                // that neither has a readable data source without root (/proc/stat has been
-                // blocked to third-party apps since Android 7; the kgsl sysfs files were
-                // denied even to adb shell). See AGENTS.md "Power Profile".
-                val device = deviceStats.get()
-                // Count of IPv6 candidates the server offered in its last ICE response;
-                // null until a stream has connected in this document.
-                val serverIpv6 = when (val count = stats.opt("serverIpv6Candidates")) {
-                    is Int -> if (count > 0) "$count offered" else "None offered"
-                    else -> "--"
-                }
-                // Address family and direct/relay of the selected ICE pair. The
-                // compatibility getStats fallback can be one poll behind.
-                val connection = stats.opt("connectionPath") as? String ?: "--"
-                val text = "Resolution      $resolution\n" +
-                    "Playback state  $state\n" +
-                    "Total frames    $total\n" +
-                    "CAS mode        ${casMode.replaceFirstChar { it.uppercase() }}\n" +
-                    "RAM used        ${device.ram}\n" +
-                    "Thermal status  ${device.thermal}\n" +
-                    "Power draw      ${device.watts}\n" +
-                    "Server IPv6     $serverIpv6\n" +
-                    "Connection      $connection"
-                if (fullStatsText?.text != text) fullStatsText?.text = text
-            } catch (_: Exception) {
-                showUnavailableStats()
+            val resolution = stats.optString("resolution", "--")
+            val total = stats.optString("totalFrames", "--")
+            val state = stats.optString("state", "No active stream")
+            // System CPU% and GPU clock/busy% are not shown: confirmed on this device
+            // that neither has a readable data source without root (/proc/stat has been
+            // blocked to third-party apps since Android 7; the kgsl sysfs files were
+            // denied even to adb shell). See AGENTS.md "Power Profile".
+            val device = deviceStats.get()
+            // Count of IPv6 candidates the server offered in its last ICE response;
+            // null until a stream has connected in this document.
+            val serverIpv6 = when (val count = stats.opt("serverIpv6Candidates")) {
+                is Int -> if (count > 0) "$count offered" else "None offered"
+                else -> "--"
             }
+            // Address family and direct/relay of the selected ICE pair. The
+            // compatibility getStats fallback can be one poll behind.
+            val connection = stats.opt("connectionPath") as? String ?: "--"
+            val text = "Resolution      $resolution\n" +
+                "Playback state  $state\n" +
+                "Total frames    $total\n" +
+                "CAS mode        $casLabel\n" +
+                "RAM used        ${device.ram}\n" +
+                "Thermal status  ${device.thermal}\n" +
+                "Power draw      ${device.watts}\n" +
+                "Server IPv6     $serverIpv6\n" +
+                "Connection      $connection"
+            if (fullStatsText?.text != text) fullStatsText?.text = text
+        } catch (_: Exception) {
+            showUnavailableStats()
         }
     }
 

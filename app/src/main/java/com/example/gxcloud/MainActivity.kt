@@ -43,6 +43,7 @@ class MainActivity : AppCompatActivity() {
     private var injectScript: String? = null
     private var pendingInjection: (() -> Unit)? = null
     private var destroyed = false
+    private val callbackOwner = WeakReference(this)
     private var casMode = "normal"
     // Persisted, unlike casMode: it's a property of the user's networks, not a
     // per-session look, so it should survive an app restart.
@@ -144,12 +145,15 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     val request = statsRequests.begin()
                     if (request != null) {
+                        val owner = callbackOwner
+                        val evaluatedView = WeakReference(view)
                         try {
                             view.evaluateJavascript(
                                 "window.__gxcloudGetStreamStats ? window.__gxcloudGetStreamStats() : null"
                             ) { raw ->
-                                if (statsRequests.complete(request)) {
-                                    if (view === webView && generation == documentGeneration) callback(raw)
+                                val activity = owner.get()
+                                if (activity != null && !activity.destroyed && activity.statsRequests.complete(request)) {
+                                    if (evaluatedView.get() === activity.webView && generation == activity.documentGeneration) callback(raw)
                                 }
                             }
                         } catch (_: IllegalStateException) {
@@ -259,20 +263,27 @@ class MainActivity : AppCompatActivity() {
                 super.onPageFinished(view, url)
                 if (view === webView && url == view.url) {
                     val generation = documentGeneration
+                    val owner = callbackOwner
+                    val evaluatedView = WeakReference(view)
                     val inject = {
-                        if (!destroyed && view === webView && generation == documentGeneration && url == view.url &&
-                            injections.begin(generation)) {
+                        val activity = owner.get()
+                        val currentView = evaluatedView.get()
+                        if (activity != null && currentView != null && !activity.destroyed &&
+                            currentView === activity.webView && generation == activity.documentGeneration &&
+                            url == currentView.url && activity.injections.begin(generation)) {
                             // Supply current selections before warm stream acquisition.
                             try {
-                                view.evaluateJavascript(
-                                    "window.__gxcloudInitialCasMode='$casMode';window.__gxcloudInitialPreferIpv6=$preferIpv6;\n" +
-                                        injectScript + "\nwindow.__gxcloudInjected === true;"
+                                currentView.evaluateJavascript(
+                                    "window.__gxcloudInitialCasMode='${activity.casMode}';window.__gxcloudInitialPreferIpv6=${activity.preferIpv6};\n" +
+                                        activity.injectScript + "\nwindow.__gxcloudInjected === true;"
                                 ) { result ->
-                                    if (view === webView && generation == documentGeneration)
-                                        injections.complete(generation, result == "true")
+                                    val target = owner.get()
+                                    if (target != null && !target.destroyed && evaluatedView.get() === target.webView &&
+                                        generation == target.documentGeneration)
+                                        target.injections.complete(generation, result == "true")
                                 }
                             } catch (_: IllegalStateException) {
-                                injections.complete(generation, false)
+                                activity.injections.complete(generation, false)
                             }
                         }
                     }

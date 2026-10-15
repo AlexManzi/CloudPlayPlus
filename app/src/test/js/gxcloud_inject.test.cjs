@@ -4,7 +4,8 @@ const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const { resolve } = require('node:path');
 const { runInNewContext } = require('node:vm');
-const source = readFileSync(resolve(__dirname, '../../main/res/raw/gxcloud_inject.js'), 'utf8');
+const source = readFileSync(process.env.GXCLOUD_SCRIPT_PATH ||
+    resolve(__dirname, '../../main/res/raw/gxcloud_inject.js'), 'utf8');
 
 // A small browser harness exercises the injected script's public entry points.
 // Mutation delivery is deferred, as in the browser, so reparenting is atomic.
@@ -980,6 +981,53 @@ test('state events invalidate cached paths without background reads and detach o
     assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, null);
     assert.equal(reads, 3);
 });
+
+for (const closure of ['event', 'stats', 'close']) {
+    test(`closed peer is released through ${closure} and stale events cannot release its replacement`, async () => {
+        let resolveStats;
+        class PeerConnection extends EventTarget {
+            constructor() { super(); this.state = 'connected'; this.readable = true; this.listeners = new Set(); }
+            get connectionState() {
+                assert.ok(this.readable, 'released peer must never be consulted again');
+                return this.state;
+            }
+            addEventListener(type, listener) { this.listeners.add(listener); super.addEventListener(type, listener); }
+            removeEventListener(type, listener) { this.listeners.delete(listener); super.removeEventListener(type, listener); }
+            close() { this.state = 'closed'; return 'native-close-result'; }
+            getStats() { return new Promise(resolve => { resolveStats = resolve; }); }
+        }
+        const b = browser('off', { RTCPeerConnection: PeerConnection });
+        const old = new b.window.RTCPeerConnection();
+        const staleEvent = [...old.listeners][0];
+        b.window.__gxcloudGetStreamStats();
+        await settle();
+        const finishOldReport = resolveStats;
+        if (closure === 'close') assert.equal(old.close(), 'native-close-result');
+        else {
+            old.state = 'closed';
+            if (closure === 'event') old.dispatchEvent(new Event('connectionstatechange'));
+            else b.window.__gxcloudGetStreamStats();
+        }
+        assert.equal(old.listeners.size, 0);
+        old.readable = false;
+        assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, null);
+
+        const current = new b.window.RTCPeerConnection();
+        staleEvent();
+        assert.equal(old.close(), 'native-close-result');
+        assert.equal(current.listeners.size, 1);
+        finishOldReport(new Map());
+        await settle();
+        assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, null);
+        await settle();
+        current.state = 'closed';
+        current.dispatchEvent(new Event('connectionstatechange'));
+        current.readable = false;
+        resolveStats(new Map());
+        await settle();
+        assert.equal(b.window.__gxcloudGetStreamStats().connectionPath, null);
+    });
+}
 
 test('playback fields stay current between connection-path checks and expiry is demand driven', () => {
     let reads = 0;

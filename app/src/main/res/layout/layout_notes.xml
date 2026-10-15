@@ -12,6 +12,7 @@
         android:layout_height="420dp"
         android:layout_gravity="center"
         android:orientation="horizontal"
+        android:baselineAligned="false"
         android:background="#1E1E1E"
         android:elevation="12dp">
 

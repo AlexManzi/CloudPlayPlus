@@ -1,0 +1,12 @@
+{
+  "name": "gxcloud-build-tools",
+  "private": true,
+  "scripts": {
+    "minify:inject": "node tools/minify-inject.cjs app/src/main/res/raw/gxcloud_inject.js app/build/generated/minifiedInject/release/raw/gxcloud_inject.js",
+    "test:js": "node --test app/src/test/js/gxcloud_inject.test.cjs",
+    "test:js:release": "npm run minify:inject && node tools/test-release-inject.cjs"
+  },
+  "devDependencies": {
+    "terser": "5.44.0"
+  }
+}

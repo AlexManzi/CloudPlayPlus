@@ -36,7 +36,7 @@ class NotesController(
     private var container: FrameLayout? = null
     private var visible = false
     private val autoSaveHandler = Handler(Looper.getMainLooper())
-    private var saveRunnable: Runnable? = null
+    private val saveRunnable = Runnable { save() }
     private val notesFile by lazy { AtomicFile(File(activity.filesDir, "gxcloud_notes.json")) }
     private val notes = mutableListOf<Note>()
     private var selectedNoteId: String? = null
@@ -64,7 +64,7 @@ class NotesController(
             val file = notesFile
             val owner = WeakReference(this)
             val handler = autoSaveHandler
-            io.execute {
+            io.read {
                 val result = load(file)
                 handler.post {
                     val controller = owner.get() ?: return@post
@@ -102,8 +102,7 @@ class NotesController(
     }
 
     fun forceSave() {
-        saveRunnable?.let { autoSaveHandler.removeCallbacks(it) }
-        saveRunnable = null
+        autoSaveHandler.removeCallbacks(saveRunnable)
         save()
     }
 
@@ -112,7 +111,6 @@ class NotesController(
         destroyed = true
         showRequested = false
         autoSaveHandler.removeCallbacksAndMessages(null)
-        saveRunnable = null
     }
 
     private fun inflate(): FrameLayout {
@@ -207,7 +205,7 @@ class NotesController(
                 }
             }
             val label = note.title.ifEmpty { "Untitled" }
-            if (row.text.toString() != label) row.text = label
+            if (!TextUtils.equals(row.text, label)) row.text = label
             if (list.getChildAt(index) !== row) {
                 list.removeView(row)
                 list.addView(row, index)
@@ -227,10 +225,8 @@ class NotesController(
     }
 
     private fun scheduleSave() {
-        saveRunnable?.let { autoSaveHandler.removeCallbacks(it) }
-        val runnable = Runnable { saveRunnable = null; save() }
-        saveRunnable = runnable
-        autoSaveHandler.postDelayed(runnable, 600)
+        autoSaveHandler.removeCallbacks(saveRunnable)
+        autoSaveHandler.postDelayed(saveRunnable, 600)
     }
 
     private fun save() {
@@ -240,7 +236,7 @@ class NotesController(
         val file = notesFile
         val owner = WeakReference(this)
         val handler = autoSaveHandler
-        io.execute {
+        io.write(file.baseFile.path) {
             val success = write(file, snapshot)
             handler.post {
                 val controller = owner.get() ?: return@post
@@ -278,8 +274,9 @@ class NotesController(
 
 
         // Idle threads expire; queued writes are never cancelled on Activity destruction.
-        val io = ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS, LinkedBlockingQueue()).apply {
+        private val executor = ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS, LinkedBlockingQueue()).apply {
             allowCoreThreadTimeOut(true)
         }
+        val io = CoalescingSerialQueue(executor)
     }
 }

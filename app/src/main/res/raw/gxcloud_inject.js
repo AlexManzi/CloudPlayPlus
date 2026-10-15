@@ -515,16 +515,20 @@
         const details = config?.serverDetails;
         const address = typeof details?.ipV6Address === 'string' && details.ipV6Address.includes(':')
             ? details.ipV6Address : null;
-        return address
-            ? { address, ports: [...new Set([details.ipV6Port, CONSOLE_DEFAULT_PORT].filter(Number.isInteger))] }
-            : null;
+        if (!address) return null;
+        const port = details.ipV6Port;
+        const ports = Number.isInteger(port) && port !== CONSOLE_DEFAULT_PORT
+            ? [port, CONSOLE_DEFAULT_PORT]
+            : [CONSOLE_DEFAULT_PORT];
+        return { address, ports };
     };
 
     // Candidate line: "a=candidate:<foundation> <component> <transport> <priority>
     // <address> <port> typ ...". Lines that don't parse pass through untouched.
+    const CANDIDATE_PRIORITY = /^\d+$/;
     const parseCandidate = (entry) => {
         const parts = typeof entry?.candidate === 'string' ? entry.candidate.split(' ') : null;
-        const valid = !!parts && parts.length > 5 && parts[0].startsWith('a=candidate:') && /^\d+$/.test(parts[3]);
+        const valid = !!parts && parts.length > 5 && parts[0].startsWith('a=candidate:') && CANDIDATE_PRIORITY.test(parts[3]);
         return { entry, parts, valid, ipv6: valid && parts[4].includes(':') };
     };
 
@@ -663,9 +667,25 @@
     let connectionPathState = null;
     let connectionPathIceState = null;
     let connectionPathCleanup = null;
+    const releaseClosedPeer = (pc) => {
+        if (streamPeerConnection !== pc) return;
+        connectionPathCleanup?.();
+        streamPeerConnection = null;
+        connectionPath = null;
+        connectionPathPending = null;
+        connectionPathCheckedAt = null;
+        connectionPathState = null;
+        connectionPathIceState = null;
+    };
     const NativePeerConnection = window.RTCPeerConnection;
     if (typeof NativePeerConnection === 'function') {
         window.RTCPeerConnection = class RTCPeerConnection extends NativePeerConnection {
+            close() {
+                const result = super.close();
+                releaseClosedPeer(this);
+                return result;
+            }
+
             constructor(...args) {
                 super(...args);
                 connectionPathCleanup?.();
@@ -680,7 +700,7 @@
                     connectionPath = null;
                     connectionPathPending = null;
                     connectionPathCheckedAt = null;
-                    if (this.connectionState === 'closed') connectionPathCleanup?.();
+                    if (this.connectionState === 'closed') releaseClosedPeer(this);
                 };
                 this.addEventListener?.('connectionstatechange', invalidate);
                 this.addEventListener?.('iceconnectionstatechange', invalidate);
@@ -750,9 +770,7 @@
             connectionPathCheckedAt = null;
         }
         if (pc.connectionState === 'closed') {
-            connectionPath = null;
-            connectionPathPending = null;
-            connectionPathCleanup?.();
+            releaseClosedPeer(pc);
             return;
         }
         const now = performance.now();
@@ -794,6 +812,15 @@
         };
     };
 
+    const MENU_RETRY_DELAYS = [150, 400, 1000, 2500, 5000];
+    const containsToggle = nodes => {
+        for (const node of nodes) {
+            if (node.nodeType === 1 &&
+                (node.matches(MENU_TOGGLE_SELECTOR) || node.querySelector(MENU_TOGGLE_SELECTOR))) return true;
+        }
+        return false;
+    };
+
     const foundVideo = (video) => {
         clearPendingMetadata(video);
         if (video.dataset.gxBound) return;
@@ -823,16 +850,8 @@
         // so it is normally already in the DOM — check synchronously first. A
         // MutationObserver alone starves here: the stream page goes DOM-quiet once
         // playing, and only guide open/close churn would ever wake it.
-        const retryDelays = [150, 400, 1000, 2500, 5000];
         let attempt = 0;
         let menuTimer = null;
-        const containsToggle = nodes => {
-            for (const node of nodes) {
-                if (node.nodeType === 1 &&
-                    (node.matches(MENU_TOGGLE_SELECTOR) || node.querySelector(MENU_TOGGLE_SELECTOR))) return true;
-            }
-            return false;
-        };
         const menuObserver = new MutationObserver(records => {
             // Only changes containing a toggle can change the document lookup result.
             // Check changed subtrees locally before paying for a document-wide query.
@@ -853,15 +872,15 @@
                 if (container?.parentNode) menuObserver.observe(container.parentNode, { childList: true });
                 return;
             }
-            if (attempt >= retryDelays.length) return;
-            menuTimer = setTimeout(tryHide, retryDelays[attempt++]);
+            if (attempt >= MENU_RETRY_DELAYS.length) return;
+            menuTimer = setTimeout(tryHide, MENU_RETRY_DELAYS[attempt++]);
         };
         tryHide();
 
         video._gxMenuCleanup = () => {
             clearTimeout(menuTimer);
             menuTimer = null;
-            attempt = retryDelays.length;
+            attempt = MENU_RETRY_DELAYS.length;
             menuObserver.disconnect();
             delete video._gxMenuCleanup;
         };

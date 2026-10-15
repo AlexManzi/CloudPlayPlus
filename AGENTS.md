@@ -5,6 +5,120 @@ was tried and rejected. Read this before suggesting changes.
 
 ---
 
+## Release 1.2.4 — 2026-10-14
+
+- Metadata is versionName 1.2.4/versionCode 6, above published v1.2.3 and the
+  available 1.2.3 APK metadata (code 5). The published v1.2.3 tag points to f83ef77,
+  which is the source comparison baseline for this release.
+- Includes release-only script minification/local mangling and local Node selection,
+  redundant launcher resource removal, closed-peer cleanup, weak WebView callbacks,
+  Notes queue coalescing, guarded CAS button styling, and small JS/Kotlin allocation
+  cleanups. No measured CPU, startup, memory, or battery improvement is claimed.
+- Known audit findings remain: Discord microphone requests lack origin restriction,
+  and Notes load/save failure handling can hide failures or replace unreadable data.
+  These existing behaviors are not fixed by this maintenance release.
+- Validation: 68 JS tests pass for each script version; 17 JVM tests and both lint
+  variants pass with no errors and 67 existing warnings each. Device playback, CAS
+  switches/exit, Discord voice continuity, Notes lifecycle saves, and adaptive launcher
+  icons still require smoke testing. No APK, tag, or GitHub release is created by
+  this workflow; exported artifacts and the historical worktree are excluded.
+
+## Release build Node selection — 2026-10-14
+
+- Android Studio's PATH selected Node 14.16.0, which cannot load the build tool's
+  node:fs import. Release generation requires Node 18+ and now checks the version
+  before imports, reporting how to configure a supported executable.
+- Gradle resolves nodeExecutable from a Gradle property first, then ignored project
+  local.properties, then node on PATH. This machine's local.properties selects its
+  installed Node 23.3.0; no machine-specific executable path is committed.
+- Release resource merging succeeds with the local setting and no command-line
+  Node override. All 68 generated-script JS tests pass. No APK was built.
+
+## Small Kotlin allocation cleanup — 2026-10-14
+
+- Notes reuses one debounce Runnable per controller. Each edit removes/reposts that
+  callback at the existing 600ms delay; force-save cancels it before saving, and
+  destruction still clears all Handler callbacks. Save snapshots/revisions and queue
+  ordering are unchanged.
+- Notes row labels use TextUtils.equals without requiring a String conversion.
+  Stats maps native CAS modes to constant Off/Normal/High labels rather than
+  capitalizing a string on each refresh.
+- All 17 JVM tests pass and debug lint passes. No APK was built; allocation and
+  GC improvements remain unmeasured.
+
+## Small JavaScript allocation cleanup — 2026-10-14
+
+- Candidate priority validation reuses one stateless regex. Menu retry delays and
+  the stream-independent toggle subtree helper are shared per document; timers,
+  observers, and cleanup callbacks remain scoped to each stream binding.
+- Console configuration builds its one/two-port array directly, preserving integer
+  validation, advertised-port-first order, and default-port deduplication.
+- All 68 JS tests pass against readable and generated release scripts. Generated
+  size is 18,840 bytes, 32 bytes larger than before; these changes reduce temporary
+  allocations rather than script size. Runtime gains remain unmeasured.
+
+## Release script local mangling — 2026-10-13
+
+- At the user's request, release minification now shortens local identifiers while
+  preserving function/class names. Compression transformations and property mangling
+  remain disabled; debug continues to use the readable source. This supersedes the
+  earlier no-mangling policy below.
+- The current release script shrinks from 24,168 to 18,808 bytes (5,360 bytes / 22.2%).
+  All 68 JS tests pass against both readable and generated scripts. AST comparison
+  confirms all string literals (including shader strings and DOM markers), property
+  names (including window exports), and explicit function/class names are preserved.
+- No APK was built. Startup, heap, battery, and G Cloud playback effects remain
+  unmeasured; device smoke testing is still required before release.
+
+## Memory retention follow-up — 2026-10-13
+
+- The existing peer subclass overrides native `close()` and releases only the current
+  peer after successful native closure. Native return/exception behavior is preserved;
+  closing an older peer cannot release its replacement. State-event and Stats cleanup
+  remain as backstops. Direct close does not require a state event or visible Stats.
+- Notes uses a process-wide coalescing serial queue. Only adjacent queued writes to
+  the same file can replace one another; running writes are immutable, and loads or
+  writes to another file form ordering barriers. Superseded snapshots/callbacks are
+  released. Replacement-Activity loads still follow earlier saves; queued writes survive
+  destruction, and a failed newest revision remains dirty and retryable.
+- Pending Stats results, menu result callbacks, deferred injection, and injection
+  acknowledgements capture weak owner/view references. Existing visibility, destroyed,
+  request-token, document-generation, URL, and WebView-identity guards remain. Compiled
+  Kotlin lambda signatures confirm no strong owner/view captures in these callbacks.
+- At the user's explicit request, the separate historical `fix-stream-start-init`
+  worktree now flushes Notes, clears its two Handlers, removes its JS bridge, and
+  detaches/destroys both WebViews on Activity destruction. Its prior edits are preserved.
+- Validation: 68 JS tests pass against readable and generated release scripts; 17 JVM
+  tests pass, including queue backlog/coalescing, running-write isolation, read barriers,
+  multi-file ordering, and failed-revision retry. Debug/release lint has no errors and
+  67 warnings each; release resources generate correctly; historical debug Kotlin
+  compiles. No APK was built, and device heap/long-session validation remains outstanding.
+
+## Resource size and cleanup update — 2026-10-13
+
+- Quick Menu CAS buttons record their last styled selection per button. Missing
+  entries still receive initial colors/backgrounds; unchanged opens/clicks skip
+  redundant styling. Notes disables baseline alignment on its outer horizontal panel.
+- Closed peer connections release the current JS reference, labels, pending report
+  identity, and state listeners. Both state events and Stats-discovered closure use
+  the same identity-guarded cleanup; stale events/reports cannot retire a replacement.
+- Release resource tasks generate a Terser-minified overlay of the readable
+  `app/src/main/res/raw/gxcloud_inject.js`; debug uses the readable source. Compression
+  transformations and mangling are disabled, ES2020 syntax is retained, and names,
+  DOM markers, and shader string values are preserved. Build-only npm dependencies
+  are pinned in `package-lock.json`; run `npm ci` with Node 18+ before release builds.
+  See `tools/README.md` for tests and the optional Gradle `nodeExecutable` property.
+- Removed ten legacy density launcher PNGs. Both adaptive icon XMLs and their
+  foreground/background resources remain for minSdk 26+. No device was connected,
+  so G Cloud launcher appearance still requires verification.
+- Checks: 67 JS tests pass against both readable and generated scripts; 12 JVM
+  tests pass; debug/release lint has no errors and 67 warnings each. Merged resources
+  confirm the release overlay and original debug script. Normalized AST comparison
+  confirms identical syntax structure, identifiers, properties, and string values.
+- Source injection size is 47,300 → 24,095 bytes (49.1% smaller). Final APK savings
+  and runtime improvements are unmeasured; no APK was built or exported. The measured
+  rendering pipeline, cadence, watchdog, and hidden Discord session policy are unchanged.
+
 ## Release 1.2.3 — 2026-10-11
 
 - Metadata is versionName 1.2.3/versionCode 5, above the prepared 1.2.2 code 4
