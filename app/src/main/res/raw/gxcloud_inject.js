@@ -9,36 +9,6 @@
     const triVerts = new Float32Array([-1,-1,3,-1,-1,3]);
     const EMPTY_PIXEL = new Uint8Array([0,0,0,255]);
 
-    // Allocate only when CAS is requested; keep the same bridge across pipelines.
-    let bridge = null;
-    let bridgeCtx = null;
-    const ensureBridge = () => {
-        if (bridgeCtx) return true;
-        try {
-            if (!bridge) {
-                bridge = document.createElement('canvas');
-                bridge.width = 1;
-                bridge.height = 1;
-            }
-            const context = bridge.getContext('2d', { alpha: false, willReadFrequently: false });
-            if (!context) return false;
-            context.imageSmoothingEnabled = false;
-            context.globalCompositeOperation = 'copy';
-            bridgeCtx = context;
-            return true;
-        } catch (_) { return false; }
-    };
-    const resetBridge = () => {
-        if (!bridge) return;
-        if (bridge.width !== 1) bridge.width = 1;
-        if (bridge.height !== 1) bridge.height = 1;
-        // Dimension assignments reset the 2D context's drawing state.
-        if (bridgeCtx) {
-            bridgeCtx.imageSmoothingEnabled = false;
-            bridgeCtx.globalCompositeOperation = 'copy';
-        }
-    };
-
     const style = document.createElement('style');
     style.textContent =
         // An xCloud container on the home route is wider than this screen. Mobile
@@ -88,10 +58,8 @@
         return true;
     };
 
-    // Exactly one stream may own the pipeline at a time. `bridge` is shared by every
-    // pipeline and _casCleanup shrinks it to 1x1, so an old pipeline tearing down
-    // after a new one binds would leave the new one drawing through a 1x1 bridge —
-    // on top of two stacked opaque canvases and two live GL contexts.
+    // Exactly one stream may own the pipeline at a time, avoiding stacked opaque
+    // canvases and multiple live GL contexts after stream replacement.
     let activeStreamVideo = null;
     const pendingMetadata = new WeakMap();
     const clearPendingMetadata = (video) => {
@@ -180,7 +148,6 @@
     const setupWebGLCAS = (video) => {
         if (casMode === 'off') return;
         if (video.dataset.casSetup) return;
-        if (!ensureBridge()) return;
         video.dataset.casSetup = 'true';
 
         let canvas = null;
@@ -215,9 +182,9 @@
             // %SHARPEN_FACTOR% is substituted below, not string-replaced against a tuned
             // literal — a future retune of the normal-mode constant can't silently break
             // high mode by no longer matching the old text.
-            const fragTemplate = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nin vec2 vUV;\nconst float sharpenFactor=%SHARPEN_FACTOR%;\nout vec4 fragColor;\nvoid main(){\n  vec3 e=texture(data,vUV).rgb;\n  vec3 b=textureOffset(data,vUV,ivec2(0,1)).rgb;\n  vec3 d=textureOffset(data,vUV,ivec2(-1,0)).rgb;\n  vec3 f=textureOffset(data,vUV,ivec2(1,0)).rgb;\n  vec3 h=textureOffset(data,vUV,ivec2(0,-1)).rgb;\n  const vec3 lw=vec3(0.2126,0.7152,0.0722);\n  float le=dot(e,lw);float lb=dot(b,lw);float ld=dot(d,lw);float lf=dot(f,lw);float lh=dot(h,lw);\n  float mn_l=min(min(min(ld,le),min(lf,lb)),lh);\n  float mx_l=max(max(max(ld,le),max(lf,lb)),lh);\n  float amp=mn_l/(mx_l+0.01);\n  float wm=clamp((le-0.05)*2.2222,0.0,1.0);\n  float cg=clamp((mx_l-mn_l-0.005)*28.57,0.0,1.0);\n  float w=-(wm*cg)*(amp*0.2);\n  float rw=1.0/(4.0*w+1.0);\n  float detL=clamp(((lb+ld+lf+lh)*w+le)*rw,0.0,1.0)-le;\n  float satBoost=1.0+wm*0.18;\n  float sharpL=le+detL/(1.0+abs(detL)*4.0)*sharpenFactor*satBoost;\n  fragColor=vec4(clamp(vec3(sharpL)+(e-vec3(le))*satBoost,0.0,1.0),1.0);\n}';
+            const fragTemplate = '#version 300 es\nprecision mediump float;\nuniform sampler2D data;\nin vec2 vUV;\nconst float sharpenFactor=%SHARPEN_FACTOR%;\nout vec4 fragColor;\nvoid main(){\n  vec3 e=texture(data,vUV).rgb;\n  vec3 b=textureOffset(data,vUV,ivec2(0,1)).rgb;\n  vec3 d=textureOffset(data,vUV,ivec2(-1,0)).rgb;\n  vec3 f=textureOffset(data,vUV,ivec2(1,0)).rgb;\n  vec3 h=textureOffset(data,vUV,ivec2(0,-1)).rgb;\n  const vec3 lw=vec3(0.2126,0.7152,0.0722);\n  float le=dot(e,lw);float lb=dot(b,lw);float ld=dot(d,lw);float lf=dot(f,lw);float lh=dot(h,lw);\n  float mn_l=min(min(min(ld,le),min(lf,lb)),lh);\n  float mx_l=max(max(max(ld,le),max(lf,lb)),lh);\n  float amp=mn_l/(mx_l+0.01);\n  float wm=clamp((le-0.05)*2.2222,0.0,1.0);\n  float cg=clamp((mx_l-mn_l-0.005)*28.57,0.0,1.0);\n  float w=-(wm*cg)*(amp*0.2);\n  float rw=1.0/(4.0*w+1.0);\n  float detL=clamp(((lb+ld+lf+lh)*w+le)*rw,0.0,1.0)-le;\n  float satBoost=1.0+wm*0.19;\n  float sharpL=le+detL/(1.0+abs(detL)*4.0)*sharpenFactor*satBoost;\n  fragColor=vec4(clamp(vec3(sharpL)+(e-vec3(le))*satBoost,0.0,1.0),1.0);\n}';
 
-            const SHARPEN_FACTOR_NORMAL = '0.37';
+            const SHARPEN_FACTOR_NORMAL = '0.43';
             const SHARPEN_FACTOR_HIGH = '1.0';
             const fragSource = fragTemplate.replace(
                 '%SHARPEN_FACTOR%',
@@ -281,12 +248,12 @@
             gl.activeTexture(gl.TEXTURE0);
             gl.uniform1i(gl.getUniformLocation(prog, 'data'), 0);
             // Runs synchronously on 'resize'. It used to be debounced 16ms, which left a
-            // frame where present() scaled the new stream resolution into the old bridge
-            // size — xCloud changes resolution mid-stream on network conditions, so that
+            // frame where present() used the previous output dimensions — xCloud
+            // changes resolution mid-stream on network conditions, so that
             // was a visible hitch every switch. Nothing to debounce: the event only fires
             // when the dimensions actually changed, and the equality check below already
             // absorbs any burst.
-            // Zero until this GL pipeline has sized both canvases and set its viewport.
+            // Zero until this GL pipeline has sized its output and set its viewport.
             let drawWidth = 0;
             let drawHeight = 0;
             const _syncSize = () => {
@@ -294,15 +261,11 @@
                 const h = video.videoHeight;
                 if (!w || !h) return;
                 if (canvas.width === w && canvas.height === h &&
-                    bridge.width === w && bridge.height === h &&
                     drawWidth === w && drawHeight === h) return;
-                canvas.width = bridge.width = w;
-                canvas.height = bridge.height = h;
+                if (canvas.width !== w) canvas.width = w;
+                if (canvas.height !== h) canvas.height = h;
                 drawWidth = w;
                 drawHeight = h;
-                // Resizing the bridge resets its 2D context to defaults — reapply
-                bridgeCtx.imageSmoothingEnabled = false;
-                bridgeCtx.globalCompositeOperation = 'copy';
                 gl.viewport(0, 0, w, h);
             };
             _syncSize();
@@ -314,14 +277,13 @@
 
             const present = () => {
                 if (video.readyState < 2 || video.paused || document.hidden) return;
-                bridgeCtx.drawImage(video, 0, 0, drawWidth, drawHeight);
-                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bridge);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
                 gl.drawArrays(gl.TRIANGLES, 0, 3);
             };
 
             // Draw the moment the frame is decoded. This used to set a flag that the
             // next rAF tick acted on, which cost up to a full vsync of latency before
-            // the frame was even copied, and put the GPU work on the vsync critical
+            // the frame was even uploaded, and put the GPU work on the vsync critical
             // path. Draw count is unchanged — rVFC fires exactly once per decoded
             // frame, which is what the old flag gated on.
             const onVFC = () => {
@@ -414,7 +376,6 @@
                 video.removeEventListener('resize', _syncSize);
                 canvas.removeEventListener('webglcontextlost', onContextLost, false);
                 canvas.remove();
-                resetBridge();
                 video.style.visibility = '';
                 delete video.dataset.casSetup;
                 delete video._casCleanup;
@@ -458,7 +419,6 @@
             // Setup must never hide direct video or prevent the native play() call.
             try { video._casCleanup?.(); } catch (_) {}
             canvas?.remove();
-            resetBridge();
             video.style.visibility = '';
             delete video.dataset.casSetup;
             delete video._casCleanup;

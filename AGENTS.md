@@ -1,5 +1,39 @@
 # GxCloud — Agent Reference
 
+## Release 2.0 — Direct video — 2026-10-31
+
+- Metadata is versionName 2.0/versionCode 7. CAS uploads the video directly with
+  `texImage2D`; the bridge canvas and 2D context have been removed. Canvas width and
+  height are assigned only when each changes, retaining initial viewport setup.
+- Includes the user's existing Normal CAS strength 0.43 and saturation boost 0.19
+  (High remains 1.0). Frame timing, continuous rAF, watchdog, and lifecycle guards remain.
+- Five-minute exploratory tests favored direct upload over the bridge. Conditions,
+  test wrapper differences, and limited repetitions prevent a precise battery claim.
+  The cleaned-up current-source diagnostic run measured 759.5 mA; scheduler tracing
+  added overhead and shader tuning differed from earlier isolated tests. Details are
+  in `RENDER_TEST.md`; raw traces and test APKs stay local and excluded from Git.
+- All 67 JS tests pass against readable and generated release scripts. Current-source
+  release builds pass and the user ran the release-mode test build on the G Cloud.
+  Full CAS switching, resolution-change, exit, and recovery smoke checks remain.
+- Known Discord microphone-origin and Notes failure-handling findings remain as
+  documented for 1.2.4. No publication APK or GitHub release is included in this push.
+
+## Direct video upload — 2026-10-31
+
+- At the user's request, CAS uploads the video directly with `texImage2D` instead of
+  copying each frame through the bridge canvas. CAS tuning, render timing, and lifecycle
+  handling are unchanged. The unused bridge canvas/context and its resize/reset work
+  have now been removed at the user's request. CAS no longer requires 2D context
+  availability. Output sizing retains an explicit first-viewport guard for 300×150
+  and 1×1 streams. The current-source cleanup build was exercised in a five-minute
+  device trace (759.5 mA); differing instrumentation and tuning mean it does not
+  isolate the cleanup's power effect. Full lifecycle smoke testing remains outstanding.
+- One five-minute Remote Play run measured 746.8 mA vs 790.0 mA for one installed-app
+  bridge run. These are whole-device readings with unverified matching conditions and
+  separately rebuilt test wrappers; no repeatable saving is established. The earlier
+  direct-upload battery finding below is historical and is superseded as a prohibition,
+  not invalidated as a measurement. See `RENDER_TEST.md` for all results and limits.
+
 This document captures every non-obvious decision made in this codebase, why it was made, and what
 was tried and rejected. Read this before suggesting changes.
 
@@ -613,12 +647,12 @@ boost.
 - **`textureOffset(data, vUV, ivec2(...))`** — constant-offset variant; GLSL ES 3.0 core. Compiler folds the offset into the texture fetch. Equivalent cost to a plain `texture()` call. Offsets ±1 are well within `gl_MinProgramTexelOffset`/`gl_MaxProgramTexelOffset` range.
 - **`precision mediump float`** — Adreno 618 runs mediump on FP16 ALUs (~2× throughput vs highp). Do not change to highp.
 - **`const vec3 lw`** — compile-time constant enables driver constant folding on all `dot(x, lw)` calls. Do not make it a uniform.
-- **`const float sharpenFactor = 0.37`** — compile-time constant, no uniform lookup needed. This is the tuned strength; changing it changes the look. **It drifted to `3.0` at some point and was restored on 2026-09-10.** At 3.0 the sharpen is ~8× too strong: the soft limiter caps `detL/(1+4|detL|)` at 0.25, so the max luma push is ~0.75 (then hard-clamped by the final `clamp`) versus ~0.09 at 0.37 — halos and ringing on hard edges, clipped highlights, and amplified compression noise/banding in shadows despite the dark gate. If the image ever looks crunchy, check this constant first.
+- **Normal `sharpenFactor = 0.43`** — compile-time constant, no uniform lookup needed. This is the tuned strength; changing it changes the look. It previously drifted to `3.0` and was restored on 2026-09-10. At 3.0 the soft limiter caps `detL/(1+4|detL|)` at 0.25, so the max luma push is ~0.75 (then hard-clamped by the final `clamp`) versus ~0.11 at 0.43 — halos and ringing on hard edges, clipped highlights, and amplified compression noise/banding in shadows despite the dark gate. If the image ever looks crunchy, check this constant first.
 - **`amp = mn_l / (mx_l + 0.01)`** — the CAS adaptive term, already in simplified form (3 GPU ops: add, RCP, mul). No `sqrt` — it was removed.
 - **Dark gate `wm = clamp((le - 0.05) * 2.2222, 0, 1)`** — suppresses sharpening in dark areas so stream noise in shadows is not amplified. Doubles as the saturation-boost weight.
 - **Contrast gate `cg = clamp((mx_l - mn_l - 0.005) * 28.57, 0, 1)`** — suppresses sharpening on near-flat regions. Without it, compression noise and banding in smooth gradients (skies, walls, UI backgrounds) get sharpened into visible texture. Fades in over a narrow luma-range window rather than switching hard, to avoid a visible threshold edge.
 - **Soft limiter `detL / (1.0 + abs(detL) * 4.0)`** — bounds the sharpening delta instead of letting it apply linearly. This is the halo fix: hard edges would otherwise overshoot into bright/dark ringing. Compresses large deltas, leaves small ones nearly untouched.
-- **Saturation boost** (`satBoost = 1.0 + wm * 0.18`) — intentional, user wants this visual style. Applied both to the luma sharpen amount and the chroma expansion. Weighted by `wm` so dark areas are not over-saturated. **Do not remove.**
+- **Saturation boost** (`satBoost = 1.0 + wm * 0.19`) — intentional, user wants this visual style. Applied both to the luma sharpen amount and the chroma expansion. Weighted by `wm` so dark areas are not over-saturated. **Do not remove.**
 - **`vec3(sharpL) + (e - vec3(le)) * satBoost`** — luma-preserving chroma expansion; final `clamp` to [0,1].
 - **5-tap cross pattern** — minimum for isotropic sharpening. Dropping to 4 taps requires an asymmetric or diagonal pattern with visible quality loss on game content. Do not reduce.
 

@@ -110,7 +110,12 @@ function browser(mode = 'off', { attached = true, webgl = true, glOverrides = {}
                     if (key === 'getExtension') return () => ({ loseContext() { lostContexts++; } });
                     if (key === 'drawArrays') return () => draws.push('draw');
                     if (key === 'texImage2D') return (...args) => {
-                        if (args.length === 6) draws.push('upload');
+                        if (args.length === 6) {
+                            const video = args[5];
+                            assert.equal(video.tagName, 'VIDEO');
+                            draws.push('video', 'upload');
+                            drawSizes.push([video.videoWidth, video.videoHeight]);
+                        }
                     };
                     return () => ({});
                 }
@@ -261,10 +266,7 @@ for (const [name, failure] of [
         replacement.emit('ended');
         assert.equal(replacement.dataset.gxBound, undefined);
         assert.equal(b.timers.size, 0);
-        for (const element of b.created.filter(e => e.context2d)) {
-            assert.equal(element.width, 1);
-            assert.equal(element.height, 1);
-        }
+        assert.equal(b.canvas2dRequests, 0);
     });
 }
 
@@ -276,55 +278,42 @@ test('CAS can retry successfully after a WebGL setup exception', () => {
     b.window.__gxcloudSetCasMode('high');
     assert.equal(b.canvases().length, 1);
     b.frame();
-    assert.deepEqual(b.draws, ['bridge', 'upload', 'draw']);
+    assert.deepEqual(b.draws, ['video', 'upload', 'draw']);
     b.video.emit('ended');
     assert.equal(b.canvases().length, 0);
     assert.equal(b.raf.size, 0);
     assert.equal(b.vfc.size, 0);
 });
 
-test('Off defers bridge allocation until CAS is selected and reuses it across modes', () => {
+test('CAS mode switches never allocate a 2D bridge', () => {
     const b = browser('off');
-    assert.equal(b.canvas2dRequests, 0);
     assert.equal(b.created.filter(e => e.tagName === 'CANVAS').length, 0);
-    b.window.__gxcloudSetCasMode('normal');
-    const bridge = b.created.find(e => e.context2d);
-    assert.ok(bridge);
-    assert.equal(b.canvas2dRequests, 1);
-    b.window.__gxcloudSetCasMode('high');
-    assert.equal(b.canvas2dRequests, 1);
-    assert.equal(b.created.filter(e => e.context2d).length, 1);
+    for (const mode of ['normal', 'high', 'off', 'normal']) {
+        b.window.__gxcloudSetCasMode(mode);
+        assert.equal(b.canvas2dRequests, 0);
+        assert.equal(b.canvases().length, mode === 'off' ? 0 : 1);
+    }
 });
 
 for (const throws of [false, true]) {
-    test(`a ${throws ? 'throwing' : 'null'} bridge context preserves stats, IPv6 hooks, and direct video`, () => {
+    test(`CAS works with ${throws ? 'throwing' : 'null'} 2D context support`, () => {
         const b = browser('normal', { canvas2d: () => {
-            if (throws) throw new Error('Allocation failed');
+            if (throws) throw new Error('2D context unavailable');
             return false;
         } });
-        assert.equal(b.window.__gxcloudInjected, true);
+        assert.equal(b.canvas2dRequests, 0);
         assert.equal(b.window.__gxcloudGetStreamStats().state, 'Playing');
         assert.equal(typeof b.window.__gxcloudSetPreferIpv6, 'function');
-        b.window.__gxcloudSetPreferIpv6(true);
-        assert.notEqual(b.video.style.visibility, 'hidden');
-        assert.equal(b.video.dataset.casSetup, undefined);
+        assert.equal(b.video.style.visibility, 'hidden');
+        assert.equal(b.canvases().length, 1);
+        b.frame();
+        assert.deepEqual(b.draws, ['video', 'upload', 'draw']);
+        b.video.emit('ended');
         assert.equal(b.canvases().length, 0);
         assert.equal(b.raf.size, 0);
-        b.video.emit('ended');
-        assert.equal(b.video.dataset.gxBound, undefined);
+        assert.equal(b.vfc.size, 0);
     });
 }
-
-test('bridge allocation can retry on a later CAS selection', () => {
-    let available = false;
-    const b = browser('normal', { canvas2d: () => available });
-    assert.equal(b.canvases().length, 0);
-    available = true;
-    b.window.__gxcloudSetCasMode('high');
-    assert.equal(b.canvases().length, 1);
-    b.frame();
-    assert.deepEqual(b.drawSizes.at(-1), [1920, 1080]);
-});
 
 for (const [width, height] of [[300, 150], [1, 1]]) {
     test(`CAS initializes and restores matching canvas dimensions at ${width}×${height}`, () => {
@@ -333,12 +322,10 @@ for (const [width, height] of [[300, 150], [1, 1]]) {
         b.video.videoWidth = width;
         b.video.videoHeight = height;
         b.window.__gxcloudSetCasMode('normal');
-        const bridge = b.created.find(e => e.context2d);
         const checkSize = () => {
-            assert.equal(bridge.width, width);
-            assert.equal(bridge.height, height);
-            assert.equal(bridge.context2d.imageSmoothingEnabled, false);
-            assert.equal(bridge.context2d.globalCompositeOperation, 'copy');
+            assert.equal(b.canvases()[0].width, width);
+            assert.equal(b.canvases()[0].height, height);
+            assert.equal(b.canvas2dRequests, 0);
             assert.deepEqual(viewports.at(-1), [0, 0, width, height]);
             b.frame();
             assert.deepEqual(b.drawSizes.at(-1), [width, height]);
@@ -355,31 +342,23 @@ for (const [width, height] of [[300, 150], [1, 1]]) {
     });
 }
 
-test('context loss releases bridge storage and restoration reuses it with correct drawing state', () => {
+test('context loss restores CAS direct upload without allocating a bridge', () => {
     const b = browser('normal');
-    const bridge = b.created.find(e => e.context2d);
     const canvas = b.canvases()[0];
     canvas.emit('webglcontextlost');
-    assert.equal(bridge.width, 1);
-    assert.equal(bridge.height, 1);
-    assert.equal(bridge.context2d.imageSmoothingEnabled, false);
-    assert.equal(bridge.context2d.globalCompositeOperation, 'copy');
+    assert.equal(b.canvases().length, 0);
     assert.equal(b.raf.size, 0);
     assert.notEqual(b.video.style.visibility, 'hidden');
     b.video.videoWidth = 1280;
     b.video.videoHeight = 720;
     canvas.emit('webglcontextrestored');
-    assert.equal(b.created.filter(e => e.context2d).length, 1);
-    assert.equal(bridge.width, 1280);
-    assert.equal(bridge.height, 720);
-    assert.equal(bridge.context2d.imageSmoothingEnabled, false);
-    assert.equal(bridge.context2d.globalCompositeOperation, 'copy');
+    assert.equal(b.canvas2dRequests, 0);
+    assert.equal(b.canvases()[0].width, 1280);
+    assert.equal(b.canvases()[0].height, 720);
     b.frame();
     assert.deepEqual(b.drawSizes.at(-1), [1280, 720]);
     b.canvases()[0].emit('webglcontextlost');
     b.video.emit('ended');
-    assert.equal(bridge.width, 1);
-    assert.equal(bridge.height, 1);
     canvas.emit('webglcontextrestored');
     assert.equal(b.canvases().length, 0);
 });
@@ -536,7 +515,7 @@ test('mode switches preserve binding, one canvas, and the measured draw cadence'
         if (mode !== 'off') {
             const start = b.draws.length;
             b.frame();
-            assert.deepEqual(b.draws.slice(start), ['bridge', 'upload', 'draw']);
+            assert.deepEqual(b.draws.slice(start), ['video', 'upload', 'draw']);
         }
     }
     assert.equal(b.lostContexts, 3);
@@ -559,7 +538,7 @@ test('successful CAS avoids temporary removal observers at startup and mode swit
     assert.equal(b.observers.size, 2);
     assert.equal(b.video._gxOffCleanup, undefined);
     b.frame();
-    assert.deepEqual(b.draws.slice(-3), ['bridge', 'upload', 'draw']);
+    assert.deepEqual(b.draws.slice(-3), ['video', 'upload', 'draw']);
 });
 
 test('failed CAS on detached acquisition retains the bounded attachment watch', () => {

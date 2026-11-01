@@ -1,6 +1,75 @@
 # Render pipeline test plan
 
-Status: planned; no experiments or measurements have been performed under this plan.
+Status: initial bridge and subimage measurements completed; further tests pending.
+
+## Initial results — 2026-10-31
+
+| Pipeline | Mean discharge | Median discharge | Samples |
+| --- | ---: | ---: | --- |
+| Installed bridge app | 790.0 mA | 795.9 mA | 301 over 299.6 s |
+| Installed bridge app, repeat | 827.4 mA | 832.8 mA | 301 over 299.0 s |
+| Bridge + `texSubImage2D` test app | 782.4 mA | 785.8 mA | 301 over 299.4 s |
+| VideoFrame + `texSubImage2D` test app | 800.9 mA | 804.7 mA | 301 over 299.0 s |
+| Direct video + `texImage2D` test app | 746.8 mA | 745.2 mA | 301 over 299.4 s |
+| Direct video + `texImage2D` repeat | 712.7 mA | 710.4 mA | 301 over 299.7 s |
+| Direct video + `texSubImage2D` test app | 791.6 mA | 802.3 mA | 301 over 299.3 s |
+| Updated main source, bridge removed, process diagnostics | 759.5 mA | 763.5 mA | 301 over 299.8 s |
+
+The updated main-source diagnostic run adds scheduler/process tracing, unlike the
+earlier battery-only runs. It also uses current source CAS tuning (Normal 0.43,
+saturation 0.19) rather than the isolated apps' extracted settings (0.37/0.18);
+actual selected mode was not independently confirmed. It cannot isolate the effect
+of bridge removal. Total power was approximately 2.87 W using endpoint voltages.
+Process CPU breakdown and limitations are saved locally in
+`captures/render-tools/direct-cleanup-process-2026-10-31.md`.
+
+The subimage run was 7.6 mA (~1.0%) lower in mean discharge. These are single
+whole-device runs, not enough to establish an improvement. The user chose to use the
+installed-app bridge run as the baseline without repeating it. The subimage test used
+the installed APK's extracted video script with allocation on resize and subimage upload;
+its release-mode Android wrapper was rebuilt from available source and is not confirmed
+identical to the installed app. Conditions and CAS mode have not been fully recorded.
+Subimage had a one-minute warm-up; the bridge test's warm-up duration was not recorded.
+The VideoFrame test also had a one-minute warm-up; its mean was 10.9 mA (~1.4%) higher
+than the bridge run and 18.5 mA (~2.4%) higher than subimage. Each is one run, so these
+small differences do not establish a reliable ranking. The VideoFrame test uses a separate
+release-mode wrapper rebuilt from available source, and still allocates an unused bridge
+canvas at setup; it skips the per-frame bridge copy. Frames are closed after upload.
+The direct-video run used a one-minute warm-up and averaged 43.2 mA (~5.5%) less
+discharge than the bridge run. This is a single run per option, with unverified matching
+conditions and rebuilt test-app wrappers; the result does not establish a reliable saving.
+The direct-video variant still allocates an unused bridge canvas during setup. The device
+was discharging and the direct-video test app was foreground after the capture; battery
+was 60%, 3.834 V, and 32.1 °C. Playback quality and CAS selection remain unconfirmed.
+Direct video + subimage was added as a fifth candidate and averaged 791.6 mA, 44.8 mA
+(~6.0%) above direct video + `texImage2D` in these single runs. It had a one-minute
+warm-up, was the foreground test app after capture, and the device was discharging;
+battery afterward was 55%, 3.800 V, and 33.0 °C. The same single-run, conditions, and
+wrapper limitations apply. Its raw trace is in `captures/render-tools/`.
+The direct-video repeat averaged 712.7 mA, 34.0 mA below its first run and 77.3 mA
+below the single bridge baseline. Warm-up and matched scene/settings were not confirmed;
+device was discharging and the correct app was foreground before and after the capture.
+Afterward battery was 53%, 3.798 V, and 33.1 °C. A second direct-video run does not
+resolve the single-baseline or differing-wrapper limitations. Its raw trace is in
+`captures/render-tools/`.
+The bridge repeat averaged 827.4 mA (median 832.8 mA), with a one-minute warm-up;
+the installed normal app was foreground before and after, and the device was
+discharging. Battery was 52%, 3.786 V, 33.3 °C before warm-up and 50%, 3.759 V,
+34.3 °C afterward. The preceding direct-video repeat averaged 712.7 mA (median
+710.4 mA), a 114.7 mA (~13.9%) lower mean than this bridge run. Scene, stream
+parameters, CAS selection, and device conditions were not independently confirmed;
+installed and rebuilt test wrappers may differ. Two runs per path show a consistent
+direction but do not establish a precise saving or isolate causation. The raw bridge
+repeat trace is in `captures/render-tools/`.
+
+The installed APK reports version 1.2.3/code 5, but its version label may be stale;
+its video script is the authoritative baseline, not the published tag. Its extracted
+Normal CAS strength is 0.37 and saturation factor is 0.18. WebView was 156.0.8078.47.
+The local raw traces and detailed records are in the ignored `captures/render-tools/`
+directory and are not included in Git. Playback quality and input feel remain unrecorded.
+
+All five candidates have been measured; direct video + `texImage2D` has two runs. Decide with the user whether to
+repeat tests or investigate differences before adopting a pipeline change.
 
 The user wants to revisit video upload alternatives and compare real device measurements
 against the current bridge pipeline. This explicit retest supersedes the earlier decision
@@ -66,7 +135,9 @@ noise and drift when comparing alternatives.
   throughout. Record battery voltage too if available for approximate total watts.
 - Collect at least three runs per candidate on the same device. Interleave baseline runs
   to expose drift: B → C → B → V → B → D, then repeat in a different candidate order
-  until each candidate has at least three runs. Compare each candidate with nearby B runs;
+   until each candidate has at least three runs, if the user chooses to repeat the baseline.
+  The user has currently chosen to keep the original single bridge run. Compare candidates
+  with it and clearly report the resulting limitations;
   keep the same warm-up and measurement windows. More runs or a second session are useful
   if thermal drift, battery changes, or noise obscure the result.
 - Record mean and median discharging current for each run, plus spread or variability;
